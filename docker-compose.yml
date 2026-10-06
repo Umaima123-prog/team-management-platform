@@ -1,0 +1,25 @@
+name: team-management-platform
+
+services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: tm-nats
+    restart: unless-stopped
+    command: ["-c", "/etc/nats/nats-server.conf"]
+    ports:
+      - "${NATS_CLIENT_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+      - "${NATS_CLUSTER_PORT:-6222}:6222"
+    volumes:
+      - ./docker/nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats-jetstream-data:/data/jetstream
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  nats-jetstream-data:
+    name: tm-nats-jetstream-data

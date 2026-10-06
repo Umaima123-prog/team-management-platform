@@ -1,0 +1,32 @@
+[project]
+name = "activity-insights-service"
+version = "0.1.0"
+description = "Activity & Insights Service - owns inbox/deduplication records, activity projection, workload projection, and processing failures."
+requires-python = ">=3.12"
+readme = "README.md"
+license = { text = "UNLICENSED" }
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+packages = ["activity_insights"]
+mypy_path = "src"
+strict = false
+ignore_missing_imports = true
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

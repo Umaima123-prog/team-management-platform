@@ -1,0 +1,40 @@
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Node / NestJS (management-service, admin-ui) ---
+node_modules/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+.npm/
+
+# --- Python (activity-insights-service) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# --- Docker / data volumes (if ever bind-mounted locally) ---
+docker/**/data/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Logs ---
+*.log
+logs/
