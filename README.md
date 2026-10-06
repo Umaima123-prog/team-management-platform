@@ -17,6 +17,7 @@ fit together and what is/isn't implemented yet, and
 │   └── activity-insights-service/  # Python 3.12+ - owns insights_db
 ├── docs/
 │   ├── ARCHITECTURE.md
+│   ├── API.md                   # Management Service REST API reference
 │   ├── EVENT_CATALOG.md
 │   ├── DECISIONS.md
 │   └── TIMELOG.md
@@ -48,6 +49,17 @@ connect to MongoDB Atlas via their own `.env` files (see each service's
 
 ## Status
 
-Phase 1: repository foundation, service skeletons, local NATS/JetStream
-infra, and documentation. No business logic (teams/projects/boards/work
-items, event publishing/consumption) is implemented yet.
+- **Phase 1**: repository foundation, service skeletons, local
+  NATS/JetStream infra.
+- **Phase 2**: MongoDB Atlas persistence foundation (connection,
+  health/readiness, index bootstrap) for both services, verified
+  live.
+- **Phase 3**: the authoritative Management Service business domain
+  and REST API - teams, memberships/roles, projects, one Kanban board
+  per project, Jira-like work items, optimistic concurrency, move/
+  reorder, validation/rate-limiting. See
+  [`docs/API.md`](docs/API.md) for every route.
+
+**Not yet implemented**: JetStream event publishing/consumption, the
+transactional outbox, Python-side projections, and the AdminLTE admin
+UI.

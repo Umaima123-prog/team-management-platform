@@ -147,3 +147,78 @@ runner for a project this size, and does not need its own CI step.
 collection without going through the scoped base methods, hand-written
 `createIndex` calls scattered across business-logic files instead of
 one registry.
+
+## 8. Request context via a trusted development header (Phase 3)
+
+**Decision:** No real authentication system in Phase 3 (explicitly
+descoped). Instead, `X-Dev-User-Id` names a real user id; a global
+guard (`RequestContextGuard`) looks that user up and derives
+`workspaceId` from the user's own stored record - never from anything
+the client sends directly. This becomes the `RequestContext` every
+service/repository call is scoped by.
+
+**Why:** The task needed workspace isolation to be real and
+server-enforced without building a login system this phase didn't
+have budget for. Deriving `workspaceId` from a DB-verified identity
+(rather than accepting it as input) is what makes "never trust a
+client-supplied workspaceId" true in code, not just in a comment.
+
+**Rules out:** any request body, query string, or header carrying
+`workspaceId` directly and having anything trust it; a future
+authentication system replaces only the identity-resolution step
+inside the guard - `RequestContext` and everything built on it stay
+the same.
+
+## 9. Business-rule tests are mocked unit tests, not Mongo-backed e2e (Phase 3)
+
+**Decision:** Teams/projects/work-items business rules (duplicate
+codes, membership uniqueness, role authorization, cross-workspace
+rejection, issue-key generation, rank/move logic, 409-on-stale-version,
+pagination, archive behavior) are covered by unit tests with
+mocked repositories (`src/**/*.spec.ts`), not HTTP-level e2e tests
+against a real database.
+
+**Why:** A real-MongoDB integration-test setup was attempted first
+(`mongodb-memory-server`, an in-memory `mongod`) specifically to get
+genuine database-backed coverage of the new domain. Its binary
+download stalled indefinitely in this sandboxed network environment -
+confirmed stuck at a fixed byte offset across repeated attempts, not
+merely slow - so it was abandoned rather than left as a flaky or
+silently-skipped dependency. Separately, every protected route (all of
+them except the two health checks) resolves its `RequestContext`
+through a real database lookup in `RequestContextGuard` *before* any
+guard, pipe, or controller logic runs - so even a validation-only HTTP
+test would require a reachable database. Mocked unit tests exercise
+the same service-layer logic without either problem, which is this
+project's existing documented strategy (the same pattern
+`database.service.spec.ts` used in Phase 2).
+
+**Rules out:** depending on `mongodb-memory-server` (or any other
+real-database test fixture) for this phase; claiming HTTP-level
+integration coverage that doesn't actually exist. What this does
+*not* cover: whether MongoDB's own unique/partial indexes actually
+enforce the constraints the mocks assume they do - that remains
+verified only by the live Atlas check (Phase 2's `/health/ready`
+pattern), not by an automated test, and is named explicitly as an
+incomplete item.
+
+## 10. Team roles gate team mutations; projects/work items have no separate role check (Phase 3)
+
+**Decision:** `OWNER`/`LEAD` are required to add/remove members,
+change roles, or update a team's details; only `OWNER` may archive a
+team. Project and work-item mutations are open to any authenticated
+workspace member - there is no project-level or work-item-level role
+check.
+
+**Why:** The task specified roles (`OWNER`/`LEAD`/`MEMBER`) in the
+context of teams and membership operations specifically, not a
+general-purpose permission matrix across every resource. Adding
+project/work-item-level authorization the task didn't ask for would
+be scope creep this phase's time budget didn't afford; the
+*cross-workspace* and *team-membership* checks that **were** specified
+(owner/team same workspace, assignee must be a team member) are
+enforced regardless of who's asking.
+
+**Rules out:** assuming project/work-item endpoints are
+role-restricted - they are not, in Phase 3. A future phase that wants
+that must add it explicitly, the same way team mutations do it today.

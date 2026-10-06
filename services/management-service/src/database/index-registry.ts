@@ -6,20 +6,77 @@ export interface CollectionIndexSpec {
 }
 
 /**
- * Index bootstrap registry for management_db collections.
+ * Index bootstrap registry for management_db collections. Applied
+ * idempotently on every application bootstrap by IndexBootstrapService
+ * - this file only declares *what* indexes should exist.
  *
- * Intentionally empty in Phase 2: no domain collections
- * (workspaces/users/teams/memberships/projects/boards/columns/work_items)
- * exist yet. When a later phase introduces one, it registers its
- * indexes here; IndexBootstrapService applies whatever is registered,
- * idempotently, on application bootstrap - it does not need to change.
- *
- * Example of what a future entry looks like (not active):
- *   {
- *     collection: 'work_items',
- *     indexes: [
- *       { key: { workspaceId: 1, boardId: 1 }, name: 'workspace_board_idx' },
- *     ],
- *   }
+ * Phase 3 introduces the first domain collections (users, teams,
+ * memberships, projects, boards, work_items, counters) - see
+ * docs/ARCHITECTURE.md for collection ownership and
+ * docs/DECISIONS.md for why each uniqueness constraint exists.
  */
-export const INDEX_REGISTRY: CollectionIndexSpec[] = [];
+export const INDEX_REGISTRY: CollectionIndexSpec[] = [
+  {
+    collection: 'users',
+    indexes: [
+      { key: { workspaceId: 1 }, name: 'workspace_idx' },
+      { key: { workspaceId: 1, email: 1 }, name: 'workspace_email_unique', unique: true },
+    ],
+  },
+  {
+    collection: 'teams',
+    indexes: [
+      { key: { workspaceId: 1, code: 1 }, name: 'workspace_code_unique', unique: true },
+      { key: { workspaceId: 1, archivedAt: 1 }, name: 'workspace_archived_idx' },
+    ],
+  },
+  {
+    collection: 'memberships',
+    indexes: [
+      // "unique teamId + userId membership" - scoped to ACTIVE
+      // memberships only (partial index) so a removed-then-re-added
+      // member doesn't collide with their own history.
+      {
+        key: { teamId: 1, userId: 1 },
+        name: 'active_team_user_unique',
+        unique: true,
+        partialFilterExpression: { removedAt: null },
+      },
+      { key: { workspaceId: 1, teamId: 1 }, name: 'workspace_team_idx' },
+      { key: { workspaceId: 1, userId: 1 }, name: 'workspace_user_idx' },
+    ],
+  },
+  {
+    collection: 'projects',
+    indexes: [
+      { key: { workspaceId: 1, projectKey: 1 }, name: 'workspace_project_key_unique', unique: true },
+      { key: { workspaceId: 1, teamId: 1 }, name: 'workspace_team_idx' },
+      { key: { workspaceId: 1, archivedAt: 1 }, name: 'workspace_archived_idx' },
+    ],
+  },
+  {
+    collection: 'boards',
+    indexes: [
+      { key: { workspaceId: 1, projectId: 1 }, name: 'workspace_project_unique', unique: true },
+    ],
+  },
+  {
+    collection: 'work_items',
+    indexes: [
+      { key: { workspaceId: 1, issueKey: 1 }, name: 'workspace_issue_key_unique', unique: true },
+      // Stable keyset-pagination index: filtering by (workspaceId,
+      // projectId) and sorting/paginating by _id is served directly by
+      // this compound index, with no in-memory sort.
+      { key: { workspaceId: 1, projectId: 1, _id: 1 }, name: 'workspace_project_id_idx' },
+      // Column ordering (maxRankInColumn / listColumnOrdered / move).
+      { key: { workspaceId: 1, boardId: 1, columnId: 1, rank: 1 }, name: 'board_column_rank_idx' },
+      // Filtering.
+      { key: { workspaceId: 1, projectId: 1, assigneeId: 1 }, name: 'project_assignee_idx' },
+      { key: { workspaceId: 1, projectId: 1, priority: 1 }, name: 'project_priority_idx' },
+      { key: { workspaceId: 1, projectId: 1, type: 1 }, name: 'project_type_idx' },
+      { key: { workspaceId: 1, projectId: 1, labels: 1 }, name: 'project_labels_idx' },
+      // Free-text search over title/description (the `q` filter).
+      { key: { title: 'text', description: 'text' }, name: 'title_description_text_idx' },
+    ],
+  },
+];

@@ -7,5 +7,15 @@
 // a real database operation except the dedicated readiness test, which
 // asserts the *failure* path (503) precisely because nothing is
 // listening there.
+//
+// Phase 3 note: a real (in-memory, via mongodb-memory-server) MongoDB
+// instance was attempted for genuine integration-style e2e tests of
+// the business domain, but the required mongod binary download
+// stalled indefinitely in this sandboxed network environment (stuck
+// at a fixed byte offset across repeated attempts - not a slow
+// transfer, a dead one). Phase 3's business-rule tests use this
+// project's existing documented strategy instead: mocked-repository
+// unit tests (see src/**/*.spec.ts), consistent with how
+// database.service.spec.ts already covered Phase 2's DatabaseService.
 process.env.MONGODB_URI ??= 'mongodb://127.0.0.1:27017';
 process.env.MONGODB_DB_NAME ??= 'management_db_test';

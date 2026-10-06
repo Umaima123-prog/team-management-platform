@@ -10,6 +10,7 @@ phase so slippage is visible early rather than discovered at hour 19.
 | 2b    | Live Atlas verification of Phase 2 (real `.env` files, both services started against the real cluster) | 2026-10-06 22:48 PST | 2026-10-06 23:06 PST | ~0h 18m | Blocked on Atlas authentication - see notes below. Not yet a clean pass. |
 | 2c    | Re-verification after Atlas password correction | 2026-10-06 23:14 PST | 2026-10-06 23:16 PST | ~0h 02m | Clean pass - both services ready against live Atlas. See notes below. |
 | 2d    | Fix Python packaging/startup (`PYTHONPATH` workaround → editable install) | 2026-10-06 23:18 PST | 2026-10-06 23:26 PST | ~0h 08m | Proper fix, not a hack. See notes below. |
+| 3     | Authoritative NestJS business domain + REST API (teams, memberships, projects, boards, work items, optimistic concurrency, move/reorder, validation/rate-limiting, tests, docs) | 2026-10-06 23:30 PST | 2026-10-07 00:31 PST | ~1h 01m | Includes an abandoned `mongodb-memory-server` integration-test attempt (see notes below). |
 
 Add a new row per phase - do not overwrite history.
 
@@ -102,3 +103,58 @@ with no `PYTHONPATH` set. Verified on a completely fresh venv with
 no application behavior change - `pytest`/`ruff`/`mypy` all still pass
 unchanged, and the service's `/healthz` and `/readyz` responses against
 the live Atlas cluster are identical to Phase 2c.
+
+### Phase 3 notes
+
+Implemented teams/memberships/roles, projects, one-board-per-project
+with default columns, Jira-like work items (issue-key generation,
+optimistic concurrency, move/reorder with rank rebalancing), the
+request-context trust mechanism, and the validation/rate-limiting/
+error-envelope security baseline - see `docs/ARCHITECTURE.md` and
+`docs/DECISIONS.md` #8-10 for the design, `docs/API.md` for every
+route.
+
+**Abandoned sub-attempt**: added `mongodb-memory-server` to get real
+MongoDB-backed integration tests for the new business rules. Its
+`mongod` binary download stalled indefinitely in this sandboxed
+network environment (confirmed via a monitored retry - identical byte
+count across two separate install attempts and a dedicated
+stall-detection check; not a slow transfer, a dead one). Removed the
+dependency entirely (devDependency, global setup/teardown files, test
+helpers) rather than leave a flaky or silently-skipped piece of the
+test suite. Business-rule tests are mocked-repository unit tests
+instead (`src/**/*.spec.ts`) - see Decision #9 for the full reasoning,
+including why even HTTP-level "validation only" e2e tests weren't a
+viable middle ground (every protected route resolves `RequestContext`
+via a real DB lookup before anything else runs).
+
+**Caught and fixed before reporting**: the now-nonempty
+`INDEX_REGISTRY` (six Phase 3 collections) meant the existing
+Phase 1/2 e2e health-check test now pays real connection-attempt
+latency (6 x up to 2s) during every app boot against the
+intentionally-unreachable test placeholder. Bumped
+`test/jest-e2e.json`'s `testTimeout` 20s -> 30s for margin after
+observing the suite legitimately take ~24-50s depending on run; this
+is bounded and expected, not a hang.
+
+**Also caught and fixed**: `npm run seed`'s first real run (against
+the live Atlas cluster) printed nothing at all despite exiting 0 -
+`NestFactory.createApplicationContext(AppModule, { logger: false })`
+silences Nest's `Logger` class process-wide (not just framework
+noise), which swallowed the script's own `logger.log(...)` calls
+along with it. Fixed by switching the script's own output to plain
+`console.log`/`console.error`, independent of Nest's logger state.
+Re-ran for real afterward: one workspace + 4 users created
+successfully in `management_db` on the live Atlas cluster (output
+screened for connection-string patterns before being viewed - none
+found, as expected, since the script never logs the URI).
+
+Full verification run (fresh `npm ci`, not just incremental `npm
+install`): `npm run build` passed, `npm run lint` passed (0 errors
+after fixing unnecessary-assertion and unsafe-`any` findings -
+mongodb's generic `Filter`/`UpdateFilter` types needed a few explicit
+casts), `npm test` passed (76/76), `npm run test:e2e` passed (2/2),
+`npm audit --omit=dev` -> 0 vulnerabilities, `git diff --check` ->
+clean (CRLF notices only), secret scan -> clean (matches only the two
+expected ignored `.env` files), `git check-ignore -v` -> both `.env`
+files still ignored. Nothing committed or pushed.

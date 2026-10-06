@@ -1,7 +1,11 @@
 import { Controller, Get, HttpException, HttpStatus } from '@nestjs/common';
+import { SkipThrottle } from '@nestjs/throttler';
+import { Public } from '../common/context/public.decorator';
 import { DatabaseService } from '../database/database.service';
 
 @Controller('health')
+@Public()
+@SkipThrottle()
 export class HealthController {
   constructor(private readonly databaseService: DatabaseService) {}
 

@@ -3,7 +3,7 @@
 ## Implementation status (read this first)
 
 This document describes the **target architecture** for the Team
-Management Platform. As of Phase 2, the following exist:
+Management Platform. As of Phase 3, the following exist:
 
 - Repository/service skeletons (NestJS management-service, Python
   activity-insights-service) with no business logic.
@@ -44,15 +44,25 @@ Management Platform. As of Phase 2, the following exist:
     authentication rejection, root-caused and resolved on the
     credentials side (not a code change) - see `docs/TIMELOG.md`
     Phase 2b/2c notes for the full history.
+- **Business domain + REST API** (Phase 3): the authoritative
+  Management Service domain is implemented - workspaces/users
+  (seed-only, no CRUD API), teams + memberships + roles, projects, one
+  Kanban board per project, and Jira-like work items, all behind
+  optimistic concurrency and a real request-context/trust mechanism.
+  See "Business domain" and "Request context / trust model" below for
+  the full picture, and `docs/API.md` for every route with
+  request/response examples. `npm run seed` creates one development
+  workspace + a few users.
 - This documentation set.
 
-Nothing below about the outbox relay, event consumption, projection
-logic, or domain events/collections (workspaces/teams/projects/boards/
-work items/activity_projection/workload_projection/processing_failures)
-is implemented yet - only the connection/health/index-bootstrap
-*infrastructure* they'll sit on. Each later phase that implements a
-piece of this design must update this file so it keeps describing the
-current implementation, not just the plan.
+Nothing about the **outbox relay, JetStream event publishing/
+consumption, projection logic, or the activity_projection/
+workload_projection/processing_failures collections** is implemented
+yet - domain writes in Phase 3 land only in `management_db`; nothing
+is published anywhere, and the Python service has nothing new to
+consume. The AdminLTE UI also does not exist yet. Each later phase
+that implements a piece of this design must update this file so it
+keeps describing the current implementation, not just the plan.
 
 ## Service ownership
 
@@ -60,17 +70,13 @@ Two services, two databases, no shared collections.
 
 ### Management Service (NestJS + TypeScript)
 
-Owns, and is the only writer of, `management_db`:
-
-- `workspaces`
-- `users`
-- `teams`
-- `memberships`
-- `projects`
-- `boards`
-- `columns`
-- `work_items`
-- `outbox` (transactional outbox, see below)
+Owns, and is the only writer of, `management_db`. Collections that
+exist today (Phase 3): `workspaces`, `users`, `teams`, `memberships`,
+`projects`, `boards` (columns are embedded in the board document, not
+a separate collection), `work_items`, `counters` (the atomic
+issue-key sequence generator - see "Business domain" below). `outbox`
+does **not** exist yet - the transactional outbox below is still
+target design, not implemented.
 
 It is the system of record for all business/domain state and the only
 service that accepts write commands for that state.
@@ -104,7 +110,81 @@ synchronous HTTP call from Python into Management Service or vice
 versa for domain data. Each service's MongoDB credentials are scoped
 to its own database only.
 
-## Command flow (target design)
+## Request context / trust model
+
+There is no real authentication system in Phase 3 - that is a
+deliberate, documented scope cut (building one was explicitly out of
+scope for this phase), not an oversight. Instead, every request
+(except `GET /health` and `GET /health/ready`) must carry an
+`X-Dev-User-Id` header naming a real user id. `RequestContextGuard`
+(a global `APP_GUARD`, `src/common/context/`) looks that user up by
+`_id` and derives `{ userId, workspaceId }` - the `RequestContext` -
+from **the user's own stored `workspaceId`**, not from anything the
+client sent. Missing, malformed, or unknown ids get a 401 before the
+guard ever reaches a controller.
+
+This is the mechanism that makes "do not trust workspaceId supplied
+arbitrarily by the browser" actually true rather than aspirational:
+there is no `workspaceId` field anywhere in any request body or query
+string that any service method reads. `WorkspaceScopedRepository`
+(Phase 2) then takes that server-derived `workspaceId` and folds it
+into every query, so a client cannot widen or escape its own
+workspace's data by any input it controls.
+
+The honest limitation: `X-Dev-User-Id` is exactly what it says -
+anyone who knows or guesses a user id can act as that user. This is
+acceptable for a development/demo phase with no real end users, and
+is why this is documented here instead of left implicit. Replacing it
+with real authentication (sessions/JWT) means swapping only
+`RequestContextGuard`'s header lookup for a token-verification step -
+`RequestContext` and everything built on it (every repository, every
+service) does not need to change.
+
+## Business domain (Phase 3)
+
+The authoritative domain, in creation/dependency order:
+
+- **Teams**: `code` unique per workspace, `name`, `description`,
+  `archivedAt` (soft-delete only - never hard-deleted), `version`.
+  Creating a team makes the creator its first `OWNER` via a
+  **membership** (`teamId`+`userId`, `role` one of `OWNER`/`LEAD`/
+  `MEMBER`, unique while active - a partial unique index scoped to
+  `removedAt: null` so a removed-then-re-added member reactivates
+  their old record instead of colliding with it). Only `OWNER`/`LEAD`
+  may add/remove members or change roles or update team details; only
+  `OWNER` may archive the team.
+- **Projects**: `projectKey` unique per workspace, `ownerId` and
+  `teamId` validated to belong to the *same* workspace (and `teamId`
+  must not be archived) before the project is created - this is the
+  concrete enforcement of "reject cross-workspace references."
+  Creating a project also creates its board (next).
+- **Boards**: exactly one per project (`projectId` unique), created
+  with five default columns (Backlog, To Do, In Progress, Review,
+  Done), each an embedded `{ id, name, order, wipLimit }`. No
+  column-management API exists yet - only the defaults.
+- **Work items**: Jira-like, with an **immutable, never-reused**
+  `issueKey` (`<projectKey>-<n>`) generated from an atomic per-project
+  counter (`counters` collection, `$inc` + upsert - a single atomic
+  MongoDB operation, so concurrent creations can never collide, and
+  because the counter only ever increments, a key is never reissued
+  even after its item is archived). `assigneeId`, if set, must be an
+  active member of the project's owning team; `reporterId` (defaults
+  to the caller) must be a workspace user. Ordering within a column is
+  a sparse numeric `rank` (gap of 1024 between items) with midpoint
+  insertion for moves - see `src/work-items/rank.util.ts` for the
+  documented limitation (rebalancing) and why it's an acceptable
+  simplification for a backend-only move API with no drag/drop UI yet.
+
+Every list endpoint that needs to scale uses opaque cursor (keyset)
+pagination on `_id`, not offset/skip - see `docs/API.md`.
+
+## Command flow (target design - not yet implemented)
+
+The outbox/JetStream pipeline below remains the target design for
+when domain events need to leave the Management Service. Phase 3's
+actual write path stops at step 2: a command validates, writes the
+aggregate with its optimistic-concurrency check, and returns - there
+is no outbox record, no relay, and nothing is published anywhere yet.
 
 1. A client issues a write command to the Management Service (e.g.
    `POST /workspaces`).
@@ -195,13 +275,20 @@ request/reply:
 
 ## Optimistic concurrency and HTTP 409
 
-Mutable aggregates in `management_db` (teams, boards, columns, work
-items, etc.) carry a version field. A command handler reads the current
-version, and its MongoDB update is conditioned on that version still
-matching (`findOneAndUpdate` with a `version` filter). If another writer
-updated the aggregate first, the condition fails, no write happens, and
-the API returns **HTTP 409 Conflict** rather than silently overwriting a
-concurrent change.
+**Implemented** (Phase 3) in one shared place:
+`src/common/mongo/conditional-update.ts`. Teams, projects, and work
+items all carry a `version` field; every mutating endpoint requires
+the caller's `expectedVersion` in the body and performs a single
+`findOneAndUpdate` conditioned on `{ ...filter, version: expectedVersion
+}`. If that matches, the write applies and `version` increments
+atomically in the same operation. If it doesn't match, a second
+`findOne` (without the version filter) disambiguates: document truly
+absent -> 404; document exists but at a different version -> **HTTP
+409 Conflict** with the real `currentVersion` in the error envelope's
+`details`, so the client can re-fetch and retry instead of the server
+silently overwriting a concurrent change. Boards carry a `version`
+field too (for future column-management mutations) but have no update
+endpoint yet, so it is currently unused.
 
 ## Eventual consistency
 
@@ -212,6 +299,39 @@ updated" bounded by outbox-relay latency plus JetStream delivery
 latency. No part of this system claims or relies on exactly-once or
 immediate cross-service consistency; at-least-once delivery and
 idempotent consumers are the explicit, documented guarantee.
+
+## Security baseline (Phase 3)
+
+A direct, documented response to this project's named prior-assignment
+mistakes (unauthenticated operational endpoints, no rate limiting):
+
+- **Rate limiting**: `ThrottlerModule` as a global `APP_GUARD`
+  (120 requests/minute per client, `src/app.module.ts`). `GET /health`
+  and `GET /health/ready` opt out via `@SkipThrottle()` - they're
+  infrastructure probes, not user traffic, and must stay responsive
+  under load.
+- **Body size limits**: explicit `256kb` cap on JSON/urlencoded
+  bodies (`src/main.ts`) - comfortably above the largest validated
+  field (10,000 chars) and bounded against abuse.
+- **Input validation**: a global `ValidationPipe` with `whitelist` +
+  `forbidNonWhitelisted` + `transform` - every DTO field is
+  type/format/length-checked (`class-validator`), unknown fields are
+  rejected outright (not silently dropped or passed through), and
+  nothing reaches a repository method without having been through
+  this. This is also the first line of defense against NoSQL
+  injection via the JSON body: a field declared `@IsString()` or
+  `@IsMongoId()` cannot smuggle a Mongo query operator object (e.g.
+  `{"$gt": ""}`) through validation.
+- **No internal leakage in errors**: `AllExceptionsFilter`
+  (`src/common/errors/`) normalizes every error - expected or not -
+  into one stable envelope and, for anything unexpected, logs only the
+  error's name server-side and returns a generic message to the
+  client. The same discipline Phase 1/2 established for MongoDB
+  connection errors (log `codeName`/error name only, never the
+  connection string) is reused everywhere here.
+- **Workspace isolation & cross-reference rejection**: see "Request
+  context / trust model" and "Business domain" above - enforced
+  server-side on every read and write, not advisory.
 
 ## Database setup (MongoDB Atlas)
 
