@@ -94,3 +94,56 @@ forgotten when the first real endpoint is added.
 
 **Rules out:** treating `/health` as a precedent for shipping later
 business endpoints without auth/rate limiting.
+
+## 6. MongoDB persistence foundation (Phase 2)
+
+**Decision:** Both services connect via the official driver (`mongodb`
+for Node, `motor` for Python) with no connection attempted at module
+construction time - the client object is created, but the driver only
+actually connects on first use (a ping, or a real query). Neither
+service has any hardcoded or default connection string: `MONGODB_URI`
+and `MONGODB_DB_NAME` are read from the environment and the app fails
+fast (throws at startup/first-use) if they're missing. The Python
+service additionally refuses to start if `MONGODB_DB_NAME` is ever
+anything other than `insights_db` - a defense-in-depth guard against a
+copy-paste config mistake pointing it at `management_db`. Liveness
+(`GET /health`, `GET /healthz`) never touches the database; readiness
+(`GET /health/ready`, `GET /readyz`) pings it live and returns 503 on
+failure.
+
+**Why:** Lazy connection means the app (and its test suite) can boot
+without real Atlas credentials - required for `npm ci`/`pytest` to run
+in CI, where no `.env` with real secrets ever exists. Separating
+liveness from readiness means a transient Atlas blip doesn't get the
+container killed by an orchestrator that conflates "process is up"
+with "database is reachable." The `insights_db`-only guard turns rule 5
+("Python must never query management_db") from a code-review hope into
+something that fails loudly at startup if violated.
+
+**Rules out:** a default/fallback Mongo URI baked into application
+code, the Python service silently connecting to whatever
+`MONGODB_DB_NAME` happens to be set to, a liveness probe that depends on
+database reachability.
+
+## 7. Workspace scoping and index bootstrap as structural mechanisms
+
+**Decision:** `WorkspaceScopedRepository` (Management Service) merges
+`workspaceId` into every filter at the base-class level rather than
+trusting each future repository method to remember it. `IndexBootstrapService`
+(Node) and `bootstrap_indexes()` (Python) apply a static, versioned list
+of index specs idempotently on every startup rather than via a separate
+migration tool. Both registries are intentionally near-empty right now:
+no business collections exist yet, so there is nothing to scope or
+index beyond the inbox's own `event_id` uniqueness (the dedup
+invariant the inbox pattern depends on, independent of business schema).
+
+**Why:** Cross-tenant data leaks are usually a missing-filter bug, not
+a logic bug - making the filter impossible to omit (by construction,
+not convention) is cheaper than relying on every future PR review to
+catch it. An idempotent bootstrap-on-start is simpler than a migration
+runner for a project this size, and does not need its own CI step.
+
+**Rules out:** a future repository querying a workspace-scoped
+collection without going through the scoped base methods, hand-written
+`createIndex` calls scattered across business-logic files instead of
+one registry.

@@ -3,7 +3,7 @@
 ## Implementation status (read this first)
 
 This document describes the **target architecture** for the Team
-Management Platform. As of Phase 1, only the following exist:
+Management Platform. As of Phase 2, the following exist:
 
 - Repository/service skeletons (NestJS management-service, Python
   activity-insights-service) with no business logic.
@@ -13,14 +13,46 @@ Management Platform. As of Phase 1, only the following exist:
   `docker/nats/nats-server.conf`), the `tm-nats-jetstream-data` volume
   is correctly mounted at `/data/jetstream`, and startup logs show no
   errors. No streams/consumers exist yet - nothing publishes or
-  consumes events in Phase 1.
+  consumes events.
+- **MongoDB persistence foundation** (Phase 2): each service connects
+  to its own Atlas database via a driver client built entirely from
+  environment variables (no hardcoded URI anywhere - see
+  `docs/DECISIONS.md` #6). Neither service's app code connects eagerly
+  at boot; the driver connects lazily on first real operation.
+  - Management Service: `DatabaseModule` (`src/database/`) provides
+    the Mongo client/`Db` to the rest of the app, `DatabaseService.ping()`
+    backs `GET /health/ready` (200/503), `IndexBootstrapService` applies
+    an (currently empty) index registry on startup, and
+    `WorkspaceScopedRepository` is the base every future domain
+    repository will extend. No domain repository exists yet.
+  - Activity & Insights Service: `db.py` provides `get_client`/`get_database`/
+    `ping`, refusing to start if `MONGODB_DB_NAME` is ever anything
+    other than `insights_db`. `health_app.py` (FastAPI) exposes
+    `GET /healthz` (liveness) and `GET /readyz` (200/503, backed by
+    `ping`), and runs `index_bootstrap.bootstrap_indexes()` on startup,
+    which today only creates the inbox's unique index on `event_id`.
+    `main.py` runs this app via uvicorn - it is the service's only
+    runtime entrypoint so far.
+  - **Live Atlas verification status: PASSED.** Both services were
+    started against the real Atlas cluster with real local `.env`
+    files. `GET /health` / `GET /health/ready` (Management Service) and
+    `GET /healthz` / `GET /readyz` (Activity & Insights Service) all
+    return 200, each reporting its own correctly-scoped database name
+    (`management_db` / `insights_db`). The Python service's inbox
+    index bootstrap also completed successfully (write access
+    confirmed, not just read). An earlier run hit an Atlas
+    authentication rejection, root-caused and resolved on the
+    credentials side (not a code change) - see `docs/TIMELOG.md`
+    Phase 2b/2c notes for the full history.
 - This documentation set.
 
-Nothing below about the outbox relay, event consumption, inbox,
-projections, or domain events (workspaces/teams/projects/boards/work
-items) is implemented yet. Each later phase that implements a piece of
-this design must update this file so it keeps describing the current
-implementation, not just the plan.
+Nothing below about the outbox relay, event consumption, projection
+logic, or domain events/collections (workspaces/teams/projects/boards/
+work items/activity_projection/workload_projection/processing_failures)
+is implemented yet - only the connection/health/index-bootstrap
+*infrastructure* they'll sit on. Each later phase that implements a
+piece of this design must update this file so it keeps describing the
+current implementation, not just the plan.
 
 ## Service ownership
 
@@ -180,6 +212,62 @@ updated" bounded by outbox-relay latency plus JetStream delivery
 latency. No part of this system claims or relies on exactly-once or
 immediate cross-service consistency; at-least-once delivery and
 idempotent consumers are the explicit, documented guarantee.
+
+## Database setup (MongoDB Atlas)
+
+Both services expect a MongoDB Atlas cluster - there is no Dockerized
+local MongoDB. To set one up for local development:
+
+1. Create a free account at mongodb.com/atlas (or use an existing
+   organization) and create a project for this platform.
+2. Create one cluster (the free **M0** tier is enough for Phase 2 -
+   see limitations below). Atlas allows only one M0 cluster per
+   project, so **both `management_db` and `insights_db` live on the
+   same cluster as two separate databases** - they are isolated by
+   database name and by per-database credentials, not by separate
+   clusters.
+3. Network Access: add your IP (or `0.0.0.0/0` for a throwaway dev
+   cluster only - never do this for anything that holds real data).
+4. Database Access: create **two** database users, each scoped to only
+   its own database via a custom role:
+   - `management-service` user: `readWrite` on `management_db` only.
+   - `activity-insights-service` user: `readWrite` on `insights_db`
+     only.
+   Scoping credentials per-database at the Atlas level is what makes
+   rule 5 ("Python must never query management_db") enforceable even
+   if the application-level guard in `db.py` were ever bypassed - the
+   Python user's credentials simply cannot authenticate against
+   `management_db`.
+5. Copy each user's connection string into that service's `.env`
+   (copied from its `.env.example` - never commit `.env`) as
+   `MONGODB_URI`, with the database name in the path matching
+   `MONGODB_DB_NAME` (`.../management_db?...` or `.../insights_db?...`).
+6. Start each service; `GET /health/ready` (Node) or `GET /readyz`
+   (Python) returns 200 once the connection is live, 503 otherwise.
+
+### Atlas free-tier (M0) limitations - stated honestly
+
+- **512MB storage shared across the whole cluster**, i.e. shared
+  between `management_db` and `insights_db` together, not 512MB each.
+  This is fine for Phase 2 (no data yet) but will not hold real
+  production volume - a paid tier is required before that.
+- **Shared RAM/vCPU** with other free-tier tenants on the same
+  underlying hardware; throughput is not guaranteed and can throttle
+  under load.
+- **No VPC peering or private endpoint** - the cluster is only
+  reachable over the public internet via the IP access list, which is
+  a materially weaker trust boundary than a private network. Treat the
+  free tier as dev/demo-only for this reason alone.
+- **Auto-pauses after 60 days of inactivity** - a paused cluster
+  needs to be manually resumed from the Atlas console before either
+  service can connect again.
+- **No continuous/point-in-time backups** - only basic, limited
+  snapshotting. Do not treat an M0 cluster as the durable copy of
+  anything that matters.
+- **One M0 cluster per project** - this is *why* both databases share
+  a cluster here; it is a free-tier constraint, not an architectural
+  preference (the two-databases-two-services ownership rule itself is
+  unaffected either way).
 
 ## Local infrastructure
 

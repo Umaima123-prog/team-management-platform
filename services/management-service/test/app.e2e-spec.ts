@@ -26,4 +26,11 @@ describe('AppModule (e2e)', () => {
       .expect(200)
       .expect({ status: 'ok', service: 'management-service' });
   });
+
+  // test/setup-env.ts points MONGODB_URI at a host nothing is
+  // listening on, so this genuinely exercises the failure path: a real
+  // unreachable database must surface as 503, not a false "ok".
+  it('/health/ready (GET) returns 503 when the database is unreachable', () => {
+    return request(app.getHttpServer() as Server).get('/health/ready').expect(503);
+  });
 });
