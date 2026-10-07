@@ -981,3 +981,120 @@ the one missing field; widening `backfill_issue_key` to overwrite an
 existing issueKey - never needed (issueKey is immutable per item) and
 would make the tool capable of corrupting already-correct state on a
 bad future run.
+
+## 31. Phase 7's real-NATS e2e "no responder"/timeout tests are environment-conflicted while the real Python service is also live - not a code defect
+
+**Decision:** Left `test/nats-integration.e2e-spec.ts`'s three request/
+reply tests asserting `NO_RESPONDER`/`TIMEOUT` on the real, production
+subject names (`tm.query.v1.project_insights`,
+`tm.query.v1.project_activity`) unchanged, and documented the failure
+rather than "fixing" it.
+
+**Why:** These three tests only fail when the real
+`activity-insights-service` happens to be running at the same time
+(this project's own long-lived dev instance, kept up across this
+session for live verification) - it genuinely subscribes to those
+exact subjects and genuinely answers (`not_ready`/
+`NO_DATA_YET_FOR_PROJECT`), so the test's "assert nothing answers"
+premise is false for reasons outside the test's or the code's control,
+not because `InsightsClientService`/`ActivityClientService` behave
+incorrectly. Run standalone (real Python service stopped), these three
+pass; the other 13 e2e tests plus all 181 unit tests pass regardless.
+
+**Rules out:** weakening the assertion (e.g. accepting either a real
+reply or NO_RESPONDER) - that would silently stop testing the actual
+timeout/no-responder code path, which is a real, load-bearing
+behavior (docs/ARCHITECTURE.md's "acceptable, cheap degradation"
+contract) this project still needs proof of; stopping the live Python
+service to force a clean CI-style run - a shared-infrastructure action
+outside this task's narrow "test audit" scope, and unnecessary since
+the three tests' correctness was independently re-confirmed by their
+own prior passing runs earlier this session (before the Python service
+was left running continuously) and is provably a live-responder
+artifact, not a regression, from the error messages' own content
+(`NO_DATA_YET_FOR_PROJECT` is a real Python-service reason string, not
+a malformed-reply or code-level failure).
+
+Separately, an unrelated environment issue was found and fixed this
+phase: `admin-ui`'s `npm ci` crashed mid-reinstall
+(`EPERM: operation not permitted, unlink ... rolldown-binding...node`)
+because its own live Vite dev server (started earlier for manual
+Chrome verification) held that native binding file open - Windows
+cannot delete a loaded native module out from under the process using
+it. `npm ci` deletes `node_modules` before reinstalling, so the crash
+left `node_modules/.bin` empty (no `vitest`/`tsc`/`oxlint`). Repaired
+with a plain `npm install` (which merges/repairs rather than wiping
+first) - confirmed back to a fully working state (`npm test`,
+`npm run build`, `npm run lint` all clean) immediately after. Not a
+dependency defect; a true from-cold `npm ci` would need the dev server
+stopped first, which this phase did not do (same "don't take down
+shared live infrastructure without asking" boundary as above).
+
+## 32. Decision #31's e2e conflict resolved with a test-only per-request subject override, not by touching shared live infrastructure; queue-group distribution proven with a dedicated real-broker test
+
+**Decision:** Gave `InsightsClientService`/`ActivityClientService` a
+third, optional constructor-config lookup -
+`INSIGHTS_QUERY_SUBJECT_OVERRIDE` / `ACTIVITY_QUERY_SUBJECT_OVERRIDE` -
+read exactly like the existing `INSIGHTS_QUERY_TIMEOUT_MS` lookup:
+`config.get(KEY) ?? <the real PROJECT_*_QUERY_SUBJECT constant>`. Real
+deployments never set this key, so production behavior - the exact
+subject, from `events/subjects.ts` - is unchanged; verified by a new
+assertion in `test/nats-integration.e2e-spec.ts` reading the
+constructed client's private `subject` field via a white-box cast.
+`test/nats-integration.e2e-spec.ts`'s five request/reply tests now each
+generate their own `test.insights.<uuid>`/`test.activity.<uuid>`
+subject per test and pass it through the override, instead of
+publishing/subscribing on the real production subject.
+
+Also added one new test to the existing "durable pull consumer" block:
+two independent `Consumer` handles (`js.consumers.get`, called twice)
+bound to the *same* durable consumer name concurrently `fetch()` a
+real 10-message backlog on a dedicated throwaway, filtered consumer.
+Asserts the real broker's actual behavior, not a simulated one: all 10
+sequence numbers are collected across the two handles combined with
+*zero* overlap (no duplicate delivery) and *both* handles receive at
+least one message (genuine distribution, not one handle doing all the
+work while the other sits idle). Run 5 times across this task
+(isolated x3, plus twice more as part of the full e2e suite) with
+identical pass results every time - not a one-off.
+
+**Why:** Decision #31 documented the three-test failure as an
+environment conflict (the real Python service answering) rather than
+fixing it, reasoning that fixing it would mean either weakening a real
+assertion or stopping shared live infrastructure the session doesn't
+own outright. Told to resolve this without weakening assertions, the
+per-request unique-subject approach does both at once: it is
+*stronger* isolation than "stop the other service" would have been
+(immune to literally anything else in the NATS account ever subscribing
+to the real subject, not just immune to this one specific Python
+instance on this one specific run) and requires no process orchestration
+in the test file at all. It also quietly fixed a latent, never-reported
+flakiness risk in the two "returns ok" tests in the same block, which
+raced the real Python responder for who answered first and were not
+part of the original complaint only because the in-process stub
+happened to answer faster every time it was tried.
+
+The queue-group/competing-consumers item was previously left as an
+explicitly out-of-scope gap (docs/TIMELOG.md Phase 4 notes, "the
+assignment's own 'stretch goal'... not attempted"). Asked to verify it
+for Phase 7 without turning it into a feature build, the smallest
+faithful demonstration is exactly what JetStream pull consumers already
+do natively: no new "queue group" primitive exists to build or
+configure for pull consumption (that concept is Core NATS pub/sub
+terminology) - any number of independent handles on one durable
+consumer name inherently compete for its pending backlog. So the task
+was purely to *prove* that existing, already-relied-upon mechanism with
+a real test, not to add a feature.
+
+**Rules out:** stopping/starting the real Python responder from inside
+the Jest test file - fragile (shells out across a process/language
+boundary the test suite doesn't own), not reproducible in a plain CI
+runner that never has that Python service running in the first place
+(in which case the original 3 tests would already have been green -
+this environment's own long-lived dev instance was the entire reason
+they were ever red), and unnecessary once the subject itself is
+test-unique; weakening the `NO_RESPONDER`/`TIMEOUT`/`ok` assertions to
+also accept a real reply - would stop testing the actual fallback
+contract; implementing real queue-group consumer-group management,
+a replica-count config knob, or any other Phase-8-shaped feature work -
+out of scope, not what was asked.

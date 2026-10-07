@@ -43,12 +43,20 @@ function isValidInsightsResponse(value: unknown): value is ProjectInsightsRespon
 export class InsightsClientService {
   private readonly logger = new Logger(InsightsClientService.name);
   private readonly timeoutMs: number;
+  private readonly subject: string;
 
   constructor(
     private readonly nats: NatsConnectionService,
     config: ConfigService,
   ) {
     this.timeoutMs = Number(config.get('INSIGHTS_QUERY_TIMEOUT_MS') ?? DEFAULT_TIMEOUT_MS);
+    // Test-only seam (never set in real deployment config): lets the
+    // real-NATS e2e suite give each test its own unique subject, so
+    // its "no responder"/timeout assertions are deterministic
+    // regardless of whatever else happens to be subscribed to the
+    // real production subject (docs/DECISIONS.md #31/#32) - never
+    // read from request input, so it cannot be influenced by a caller.
+    this.subject = config.get('INSIGHTS_QUERY_SUBJECT_OVERRIDE') ?? PROJECT_INSIGHTS_QUERY_SUBJECT;
   }
 
   async getProjectInsights(
@@ -69,7 +77,7 @@ export class InsightsClientService {
       h.set('X-Correlation-Id', correlationId);
       const payload = JSON.stringify({ projectId, workspaceId, correlationId });
 
-      const msg = await nc.request(PROJECT_INSIGHTS_QUERY_SUBJECT, new TextEncoder().encode(payload), {
+      const msg = await nc.request(this.subject, new TextEncoder().encode(payload), {
         timeout: this.timeoutMs,
         headers: h,
       });
@@ -110,7 +118,7 @@ export class InsightsClientService {
       formatMessagingLog({
         service: 'management-service',
         correlationId,
-        subject: PROJECT_INSIGHTS_QUERY_SUBJECT,
+        subject: this.subject,
         aggregateId: projectId,
         latencyMs: Date.now() - start,
         result,

@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ClientSession } from 'mongodb';
 import { BoardsService } from '../boards/boards.service';
 import { DatabaseService } from '../database/database.service';
@@ -239,6 +239,24 @@ describe('ProjectsService', () => {
         actorId: ACTOR,
         payload: { teamId: 'team-2', previousTeamId: 'team-1' },
       });
+    });
+  });
+
+  describe('getProjectOrThrow', () => {
+    it('throws NotFoundException when the repository finds nothing - e.g. a real project id scoped to a different workspace', async () => {
+      projectsRepository.findById.mockResolvedValue(null);
+
+      await expect(service.getProjectOrThrow(WORKSPACE, 'proj-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(projectsRepository.findById).toHaveBeenCalledWith(WORKSPACE, 'proj-1');
+    });
+
+    it('returns the project when the repository resolves it', async () => {
+      const project = { _id: 'proj-1', workspaceId: WORKSPACE };
+      projectsRepository.findById.mockResolvedValue(project);
+
+      await expect(service.getProjectOrThrow(WORKSPACE, 'proj-1')).resolves.toBe(project);
     });
   });
 });

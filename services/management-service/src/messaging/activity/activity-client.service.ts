@@ -43,12 +43,17 @@ function isValidActivityResponse(value: unknown): value is ProjectActivityRespon
 export class ActivityClientService {
   private readonly logger = new Logger(ActivityClientService.name);
   private readonly timeoutMs: number;
+  private readonly subject: string;
 
   constructor(
     private readonly nats: NatsConnectionService,
     config: ConfigService,
   ) {
     this.timeoutMs = Number(config.get('INSIGHTS_QUERY_TIMEOUT_MS') ?? DEFAULT_TIMEOUT_MS);
+    // Test-only seam (never set in real deployment config) - see
+    // InsightsClientService's identical override for why (docs/
+    // DECISIONS.md #31/#32).
+    this.subject = config.get('ACTIVITY_QUERY_SUBJECT_OVERRIDE') ?? PROJECT_ACTIVITY_QUERY_SUBJECT;
   }
 
   async getProjectActivity(
@@ -70,7 +75,7 @@ export class ActivityClientService {
       h.set('X-Correlation-Id', correlationId);
       const payload = JSON.stringify({ projectId, workspaceId, correlationId, limit });
 
-      const msg = await nc.request(PROJECT_ACTIVITY_QUERY_SUBJECT, new TextEncoder().encode(payload), {
+      const msg = await nc.request(this.subject, new TextEncoder().encode(payload), {
         timeout: this.timeoutMs,
         headers: h,
       });
@@ -111,7 +116,7 @@ export class ActivityClientService {
       formatMessagingLog({
         service: 'management-service',
         correlationId,
-        subject: PROJECT_ACTIVITY_QUERY_SUBJECT,
+        subject: this.subject,
         aggregateId: projectId,
         latencyMs: Date.now() - start,
         result,

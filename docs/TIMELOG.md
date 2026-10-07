@@ -894,3 +894,199 @@ it). Nothing committed or pushed; Phase 7 not started.
 - Activity entries show human-readable issue keys (`PH5VER-1` / `PH5VER-2`) instead of raw WorkItem database IDs (`docs/DECISIONS.md` #29, #30).
 
 **Phase 6 is complete.** Nothing committed or pushed. Phase 7 not started.
+
+### Phase 7 notes (Testing & Hardening)
+
+Audited the existing test suites (both services) against the Phase 7
+checklist via two parallel focused passes, then closed every genuine
+gap found with narrowly-scoped additive tests (no production-code
+redesign):
+
+**NestJS** (`services/management-service/`): most checklist items
+already had real coverage. Three genuine gaps closed: (1)
+**cross-workspace access** - the actual tenant-isolation mechanism
+(`WorkspaceScopedRepository.findOneScoped`, via each real repository's
+`findById`) was never exercised with two real tenants' documents
+through real repository code, only stipulated via fully-mocked specs;
+new `database/cross-workspace-isolation.spec.ts` (3 tests) proves a
+document that exists under workspace A is unreachable via workspace
+B's `findById`. (2) The `getXOrThrow` NotFound-wrapper helpers used by
+every controller route had no direct test; added to
+`teams.service.spec.ts`/`projects.service.spec.ts`/
+`work-items.service.spec.ts`. (3) Issue-key generation's real atomic
+`$inc`+upsert uniqueness guarantee was untested (only the pure
+string-formatting helper was); new
+`work-items/counters.repository.spec.ts` (3 tests). No production bugs
+found - all three were test-coverage gaps.
+
+**Python** (`services/activity-insights-service/`): likewise mostly
+already covered via `test_processor.py`/`test_envelope.py`. Two
+genuine gaps closed: (1) the inbox's `(event_id, consumer)` **unique
+index** as a backstop (distinct from the in-process
+`already_processed` read) had no test; new `tests/test_inbox.py` (4
+tests, using `fake_mongo.py`'s `declare_unique`/`DuplicateKeyError`).
+(2) `replay.py` had zero automated coverage (only ever hand-verified -
+Phase 5 notes above); new `tests/test_replay.py` publishes one fresh,
+uniquely-identified real event to the real `TEAM_EVENTS` stream, runs
+a real `run_replay` into a throwaway namespace/consumer, asserts it
+landed correctly, and cleans up its own namespaced collections and
+consumer afterward. No production bugs found.
+
+**Reproducibility, re-run and independently re-confirmed (not just
+trusting the sub-audits' own reported numbers):**
+- Management Service: `npm ci` clean, `npm run build` clean,
+  `npm run lint` clean, `npm test` **181 passed / 24 suites** (up from
+  169/22), `npm run test:e2e` **13 passed / 3 failed** (16 total) -
+  the 3 failures are a live-environment conflict, not a defect: those
+  tests assert `NO_RESPONDER`/`TIMEOUT` on the real subject names, but
+  the real, already-running Python service genuinely answers them
+  right now. Root cause confirmed and documented, not silently
+  ignored - see `docs/DECISIONS.md` #31.
+- `activity-insights-service`: `pytest -q` **63 passed** (up from 58,
+  including the real-NATS and real-Atlas integration tests, both
+  reachable this run), `ruff check` clean, `mypy src` clean (29
+  files).
+- `admin-ui`: `npm ci` **crashed** (`EPERM` - its own live Vite dev
+  server, left running from Phase 6's manual verification, held a
+  native binding file open; `npm ci` deletes `node_modules` before
+  reinstalling and cannot complete while that file is locked) and left
+  `node_modules/.bin` empty. Repaired with `npm install` (merges/
+  repairs rather than wiping first); `npm test` **33 passed**,
+  `npm run build` clean, `npm run lint` clean (0 errors, 6 pre-existing
+  stylistic warnings) all confirmed clean immediately after. A true
+  from-cold `npm ci` with the dev server stopped was not attempted
+  (would mean stopping shared live infrastructure without asking - see
+  `docs/DECISIONS.md` #31).
+- Repository: `docker compose config` valid, `git diff --check` clean
+  (CRLF notices only), `git check-ignore -v` confirmed all three
+  services' `.env` files still ignored/untracked. No dedicated secret
+  scanner (gitleaks/trufflehog) was available in this environment; used
+  a `git grep` pattern scan instead (`mongodb+srv://`, AWS key shape,
+  PEM private-key headers) - clean, only doc prose mentioning the
+  pattern name, no real secret.
+
+**Live MongoDB/Atlas evidence**: queried the real clusters directly and
+confirmed every declared index actually exists - `management_db`:
+`event_id_unique`/`unpublished_lookup_idx` (outbox),
+`workspace_issue_key_unique` (work_items), `active_team_user_unique`
+(memberships, partial), plus every other `INDEX_REGISTRY` entry,
+all present; `insights_db`: `event_id_consumer_unique` (inbox),
+`project_occurred_idx` (activity_projection), `project_idx`
+(workload_projection).
+
+**Live end-to-end run against the real stack** (real Management
+Service, real Python service, real Atlas, real local NATS) - fresh
+team (`PH7E2E`) → 2 members (LEAD/MEMBER) → project (auto-created
+board) → 3 work items → assign (Carol→Bob) → move (Backlog→In
+Progress) → reorder (move back into Backlog between two siblings,
+rank correctly computed as the midpoint, 1536 between 1024/2048) →
+archive one item → real `400` on an out-of-team assignee → real `409`
+on a stale `expectedVersion` (`currentVersion` detail populated) →
+activity (9 real entries, every WorkItem entry's `issueKey` resolved,
+chronological) → insights (workload/status/priority counts all
+independently verified correct, including the archived item correctly
+excluded and the reassigned-away member's count at 0, not negative).
+
+**Python consumer restart, the specific Phase 7 requirement**: with
+the workflow's events fully processed (`lastProcessedStreamSeq: 137`
+on both the NestJS BFF and the Python health endpoint), the real
+Python process was stopped and restarted. Confirmed via the real
+broker, not just application logs: `consumer_info` for
+`activity-insights-v1` showed `ack_floor.stream=137`,
+`delivered.stream=137`, `num_pending=0`, `num_ack_pending=0` after the
+restart - nothing was redelivered. Re-fetched `GET .../activity` and
+`GET .../insights` immediately after and diffed them byte-for-byte
+against the pre-restart responses: identical in every field except the
+request-time `generatedAt` timestamp. **No duplication.** Test data
+(team + project, soft-delete only) archived afterward, same convention
+as every prior phase's live-verification data.
+
+**Not verified this round (honest gaps, not hidden)**: no dedicated
+secret-scanning tool was available (pattern-grep used instead, see
+above); the 3 management-service e2e failures are logically correct
+but not green in this exact concurrent-process configuration (would be
+green with the Python service stopped first - not attempted, see
+above); queue-group load balancing across two live consumer instances
+and a mid-test real NATS server restart remain out of scope, carried
+over from Phase 4's own documented stretch-goal gaps; no new
+browser/GUI click-through was performed (Phase 6's manual Chrome
+verification already covers the UI; Phase 7 is backend/API/infra
+hardening). Phase 8 scope was not reviewed, per instruction.
+
+No production-code defects were found this phase - every gap closed
+was a missing test, not a bug. No changes to `management_db`'s/
+`insights_db`'s schemas, no `.env` secret values read/printed/
+committed. **Nothing committed or pushed. Phase 8 not started.**
+
+### Phase 7 follow-up: closing the two remaining required-verification gaps
+
+Told to make the 3 live-conflicted e2e tests reproducibly green
+(without weakening assertions) and to add real evidence for the
+assignment's queue-group/competing-consumer requirement:
+
+1. **Deterministic test isolation, not process orchestration.** Gave
+   `InsightsClientService`/`ActivityClientService` a test-only
+   constructor-config override (`INSIGHTS_QUERY_SUBJECT_OVERRIDE` /
+   `ACTIVITY_QUERY_SUBJECT_OVERRIDE`, read exactly like the existing
+   `INSIGHTS_QUERY_TIMEOUT_MS` lookup - never set in real deployment
+   config, so production always resolves the real documented subject,
+   now asserted directly in a new test per client). Rewrote all five
+   request/reply tests in `test/nats-integration.e2e-spec.ts` to
+   generate their own unique `test.insights.<uuid>`/
+   `test.activity.<uuid>` subject instead of using the real production
+   subject - immune to the live Python service (or anything else)
+   ever being subscribed to it. See `docs/DECISIONS.md` #32.
+2. **Queue-group/competing-consumer evidence.** Added one new real-
+   broker test to the existing durable-pull-consumer block: two
+   independent `Consumer` handles bound to the same durable name
+   concurrently fetch a real 10-message backlog; asserts zero
+   duplicate sequence numbers across both and that both actually
+   received a share (real distribution, not one handle doing
+   everything). No new production code - this is JetStream pull
+   consumers' existing, already-relied-upon behavior, proven, not a
+   new feature.
+3. **A real defect in this session's own prior doc edit was caught by
+   `git diff --check` during re-verification**: trailing whitespace on
+   one `docs/TIMELOG.md` line from this phase's earlier evidence
+   section. Fixed immediately, re-confirmed clean.
+
+**Final re-verification, every command run fresh after the fixes
+above:**
+- `npm test` (management-service): **181 passed, 24 suites** (run
+  twice, identical).
+- `npm run test:e2e` (management-service): **19 passed, 2 suites** (16
+  original + 1 new queue-group test + 2 new subject-fallback anchor
+  tests; the 3 previously-conflicted tests now pass deterministically) -
+  run **5 times total** across this task (3 isolated re-runs of just
+  the new queue-group test, plus 2 full-suite runs), identical
+  pass results every time, with the real Python service never stopped.
+- `npm run build` / `npm run lint` (management-service): clean.
+- `pytest -q` (activity-insights-service): **61 passed, 2 skipped**.
+  The 2 skips are both Atlas-dependent (`test_real_mongo_integration.py`,
+  `test_replay.py`) - Atlas was independently confirmed transiently
+  unreachable right now via a direct driver ping
+  (`ServerSelectionTimeoutError` / TLS handshake failure, the same
+  class of issue as `docs/DECISIONS.md` #11, which has flickered
+  reachable/unreachable repeatedly across this session), re-checked
+  twice more a few minutes apart with the same result - a real,
+  external, already-documented condition, not a hidden failure (both
+  tests skip loudly with a stated reason, by design, rather than
+  falsely pass or silently vanish).
+- `ruff check src tests` / `mypy src`: both clean (29 source files).
+- `admin-ui`: `npm test` **33 passed (12 files)**, `npm run build`
+  clean, `npm run lint` clean (0 errors, same 6 pre-existing
+  stylistic-only warnings as every prior re-run this phase).
+- `docker compose config`: valid.
+- `git diff --check`: **clean** (CRLF notices only, after the
+  trailing-whitespace fix above).
+
+**PHASE 7 COMPLETE.** The only non-fully-green item (pytest's 2 Atlas-
+dependent skips) is an external cloud-connectivity condition outside
+this codebase's control, independently reconfirmed rather than taken
+on faith, and both tests are specifically *designed* to skip loudly
+with a clear reason under exactly this condition rather than fail
+silently or give a false pass - this is the tests behaving correctly,
+not an unresolved gap in this phase's own required work. Both of the
+user's required fixes (deterministic e2e isolation; queue-group
+evidence) are done, verified, and reproducible. Nothing committed or
+pushed. Phase 8 not started.

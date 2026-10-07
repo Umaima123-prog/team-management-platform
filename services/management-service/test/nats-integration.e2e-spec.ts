@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { ConfigService } from '@nestjs/config';
 import { AckPolicy, DeliverPolicy, nanos, NatsConnection } from 'nats';
 import { DatabaseService } from '../src/database/database.service';
@@ -354,11 +355,92 @@ describe('NATS JetStream integration (real local server)', () => {
       const nothingPending = await secondHandle.next({ expires: 1000 });
       expect(nothingPending).toBeNull(); // resumed from the acknowledged position, not redelivered
     }, 15_000);
+
+    it('two competing handles bound to the same durable consumer split a real backlog with no duplicate delivery and no message lost', async () => {
+      // Phase 7 (assignment: "queue group" load-distribution across
+      // competing consumer instances - e.g. two replicas of this
+      // project's own activity-insights-service or outbox relay). A
+      // JetStream *pull* consumer has no separate "queue group"
+      // concept to configure - any number of independent handles bound
+      // to the same durable_name inherently compete for the one
+      // pending-message backlog, each message handed to exactly one of
+      // them. This is the real mechanism under test, not a mock: two
+      // genuinely separate consumer handles (standing in for two
+      // running instances of a service) concurrently fetch from one
+      // real durable, and the real broker decides the split.
+      const js = await nats.getJetStreamClient();
+      const jsm = await nats.getJetStreamManager();
+
+      await jsm.consumers.add(TEAM_EVENTS_STREAM_NAME, {
+        durable_name: TEST_CONSUMER,
+        ack_policy: AckPolicy.Explicit,
+        deliver_policy: DeliverPolicy.New,
+        filter_subject: 'tm.v1.workitem.archived',
+        ack_wait: nanos(5000),
+        max_deliver: 3,
+      });
+
+      const MESSAGE_COUNT = 10;
+      for (let i = 0; i < MESSAGE_COUNT; i++) {
+        const envelope = makeEnvelope({ eventType: 'workitem.archived' });
+        await js.publish('tm.v1.workitem.archived', new TextEncoder().encode(JSON.stringify(envelope)), {
+          msgID: envelope.eventId,
+          timeout: 5000,
+        });
+      }
+
+      const handleA = await js.consumers.get(TEAM_EVENTS_STREAM_NAME, TEST_CONSUMER);
+      const handleB = await js.consumers.get(TEAM_EVENTS_STREAM_NAME, TEST_CONSUMER);
+
+      const collect = async (messages: AsyncIterable<{ seq: number; ack: () => void }>) => {
+        const seqs: number[] = [];
+        for await (const m of messages) {
+          seqs.push(m.seq);
+          m.ack();
+        }
+        return seqs;
+      };
+
+      // Both handles pull concurrently (as two real, independent
+      // processes would) - whichever messages are still pending at the
+      // moment each handle's pull reaches the server go to that
+      // handle; `fetch` returns once its own share is exhausted/times
+      // out, it does not wait for the other handle.
+      const [seqsA, seqsB] = await Promise.all([
+        handleA.fetch({ max_messages: MESSAGE_COUNT, expires: 2000 }).then(collect),
+        handleB.fetch({ max_messages: MESSAGE_COUNT, expires: 2000 }).then(collect),
+      ]);
+
+      const allSeqs = [...seqsA, ...seqsB];
+      expect(allSeqs).toHaveLength(MESSAGE_COUNT); // every message handled, none lost
+      expect(new Set(allSeqs).size).toBe(MESSAGE_COUNT); // no sequence number delivered to both handles
+      expect(seqsA.length).toBeGreaterThan(0);
+      expect(seqsB.length).toBeGreaterThan(0); // real distribution across both, not one handle doing all the work
+    }, 15_000);
   });
 
   describe('Core NATS request/reply (project insights)', () => {
-    it('returns "ok" when a real stub responder answers on the documented subject', async () => {
-      const sub = rawConnection.subscribe(PROJECT_INSIGHTS_QUERY_SUBJECT);
+    // Phase 7 (docs/DECISIONS.md #31/#32): a unique, per-test subject -
+    // via InsightsClientService's test-only INSIGHTS_QUERY_SUBJECT_OVERRIDE
+    // seam - rather than the real production subject
+    // (PROJECT_INSIGHTS_QUERY_SUBJECT). Production code always uses the
+    // real subject (the override is never set outside tests); this is
+    // what makes "nothing is subscribed"/"never replies" deterministic
+    // regardless of whatever else - e.g. this project's own real,
+    // long-running Python activity-insights-service - happens to be
+    // subscribed to the *real* subject at the same time. Without this,
+    // every test in this block races the real responder for who answers
+    // first, not just the two that previously failed outright.
+    function insightsClient(subject: string, timeoutMs: string): InsightsClientService {
+      return new InsightsClientService(
+        nats,
+        fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: timeoutMs, INSIGHTS_QUERY_SUBJECT_OVERRIDE: subject }),
+      );
+    }
+
+    it('returns "ok" when a real stub responder answers on a unique subject', async () => {
+      const subject = `test.insights.${randomUUID()}`;
+      const sub = rawConnection.subscribe(subject);
       const responderLoop = (async () => {
         for await (const msg of sub) {
           const request = JSON.parse(new TextDecoder().decode(msg.data)) as { projectId: string };
@@ -376,7 +458,7 @@ describe('NATS JetStream integration (real local server)', () => {
         }
       })();
 
-      const client = new InsightsClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+      const client = insightsClient(subject, '2000');
       const result = await client.getProjectInsights('proj-stub-1', 'ws-1', 'corr-stub-1');
 
       sub.unsubscribe();
@@ -388,8 +470,9 @@ describe('NATS JetStream integration (real local server)', () => {
       }
     }, 10_000);
 
-    it('returns "unavailable"/NO_RESPONDER immediately when nothing is subscribed', async () => {
-      const client = new InsightsClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+    it('returns "unavailable"/NO_RESPONDER immediately when nothing is subscribed to this unique subject', async () => {
+      const subject = `test.insights.${randomUUID()}`;
+      const client = insightsClient(subject, '2000');
 
       const result = await client.getProjectInsights('proj-no-responder', 'ws-1', 'corr-stub-2');
 
@@ -397,7 +480,7 @@ describe('NATS JetStream integration (real local server)', () => {
     }, 10_000);
 
     it('returns "pending"/TIMEOUT when a responder is subscribed but never replies, bounded by the configured timeout', async () => {
-      const subject = PROJECT_INSIGHTS_QUERY_SUBJECT;
+      const subject = `test.insights.${randomUUID()}`;
       const sub = rawConnection.subscribe(subject);
       const drainLoop = (async () => {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -406,7 +489,7 @@ describe('NATS JetStream integration (real local server)', () => {
         }
       })();
 
-      const client = new InsightsClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '300' }));
+      const client = insightsClient(subject, '300');
       const start = Date.now();
       const result = await client.getProjectInsights('proj-silent', 'ws-1', 'corr-stub-3');
       const elapsedMs = Date.now() - start;
@@ -417,11 +500,30 @@ describe('NATS JetStream integration (real local server)', () => {
       expect(result).toEqual({ status: 'pending', reason: 'TIMEOUT' });
       expect(elapsedMs).toBeLessThan(2000); // never blocks indefinitely
     }, 10_000);
+
+    it('resolves to the real, documented production subject when no override is given', () => {
+      // Not exercised live here (publishing on the real subject would
+      // reintroduce the exact race this file's other tests were
+      // rewritten to avoid) - just confirms the fallback this test
+      // suite's override seam depends on actually lands on the real,
+      // documented constant, not a typo'd string.
+      const client = new InsightsClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+      expect((client as unknown as { subject: string }).subject).toBe(PROJECT_INSIGHTS_QUERY_SUBJECT);
+    });
   });
 
   describe('Core NATS request/reply (project activity, Phase 6)', () => {
-    it('returns "ok" when a real stub responder answers on the documented subject', async () => {
-      const sub = rawConnection.subscribe(PROJECT_ACTIVITY_QUERY_SUBJECT);
+    // Same unique-subject rationale as the insights block above.
+    function activityClient(subject: string, timeoutMs: string): ActivityClientService {
+      return new ActivityClientService(
+        nats,
+        fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: timeoutMs, ACTIVITY_QUERY_SUBJECT_OVERRIDE: subject }),
+      );
+    }
+
+    it('returns "ok" when a real stub responder answers on a unique subject', async () => {
+      const subject = `test.activity.${randomUUID()}`;
+      const sub = rawConnection.subscribe(subject);
       const responderLoop = (async () => {
         for await (const msg of sub) {
           const request = JSON.parse(new TextDecoder().decode(msg.data)) as { projectId: string };
@@ -447,7 +549,7 @@ describe('NATS JetStream integration (real local server)', () => {
         }
       })();
 
-      const client = new ActivityClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+      const client = activityClient(subject, '2000');
       const result = await client.getProjectActivity('proj-stub-1', 'ws-1', 'corr-stub-1');
 
       sub.unsubscribe();
@@ -460,12 +562,20 @@ describe('NATS JetStream integration (real local server)', () => {
       }
     }, 10_000);
 
-    it('returns "unavailable"/NO_RESPONDER immediately when nothing is subscribed', async () => {
-      const client = new ActivityClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+    it('returns "unavailable"/NO_RESPONDER immediately when nothing is subscribed to this unique subject', async () => {
+      const subject = `test.activity.${randomUUID()}`;
+      const client = activityClient(subject, '2000');
 
       const result = await client.getProjectActivity('proj-no-responder', 'ws-1', 'corr-stub-2');
 
       expect(result).toEqual({ status: 'unavailable', reason: 'NO_RESPONDER' });
     }, 10_000);
+
+    it('resolves to the real, documented production subject when no override is given', () => {
+      // See the matching insights-block test above for why this isn't
+      // exercised live here.
+      const client = new ActivityClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+      expect((client as unknown as { subject: string }).subject).toBe(PROJECT_ACTIVITY_QUERY_SUBJECT);
+    });
   });
 });

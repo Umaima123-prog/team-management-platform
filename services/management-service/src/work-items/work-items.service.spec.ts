@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { ClientSession, ObjectId } from 'mongodb';
 import { BoardsService } from '../boards/boards.service';
 import { DatabaseService } from '../database/database.service';
@@ -527,6 +527,24 @@ describe('WorkItemsService', () => {
 
       expect(items).toHaveLength(2);
       expect(nextCursor).not.toBeNull();
+    });
+  });
+
+  describe('getItemOrThrow', () => {
+    it('throws NotFoundException when the repository finds nothing - e.g. a real item id scoped to a different workspace', async () => {
+      workItemsRepository.findById.mockResolvedValue(null);
+
+      await expect(service.getItemOrThrow(WORKSPACE, 'item-1')).rejects.toThrow(
+        NotFoundException,
+      );
+      expect(workItemsRepository.findById).toHaveBeenCalledWith(WORKSPACE, 'item-1');
+    });
+
+    it('returns the item when the repository resolves it', async () => {
+      const item = { _id: 'item-1', workspaceId: WORKSPACE };
+      workItemsRepository.findById.mockResolvedValue(item);
+
+      await expect(service.getItemOrThrow(WORKSPACE, 'item-1')).resolves.toBe(item);
     });
   });
 });

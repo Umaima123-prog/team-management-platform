@@ -1,4 +1,4 @@
-import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ClientSession } from 'mongodb';
 import { DatabaseService } from '../database/database.service';
 import { OutboxService } from '../messaging/outbox/outbox.service';
@@ -258,6 +258,22 @@ describe('TeamsService', () => {
         service.addMember(WORKSPACE, TEAM_ID, REQUESTER, { userId: 'u2', role: 'MEMBER' }, CORRELATION_ID),
       ).rejects.toThrow(ConflictException);
       expect(outboxService.enqueue).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('getTeamOrThrow', () => {
+    it('throws NotFoundException when the repository finds nothing - e.g. a real team id scoped to a different workspace', async () => {
+      teamsRepository.findById.mockResolvedValue(null);
+
+      await expect(service.getTeamOrThrow(WORKSPACE, TEAM_ID)).rejects.toThrow(NotFoundException);
+      expect(teamsRepository.findById).toHaveBeenCalledWith(WORKSPACE, TEAM_ID);
+    });
+
+    it('returns the team when the repository resolves it', async () => {
+      const team = { _id: TEAM_ID, workspaceId: WORKSPACE };
+      teamsRepository.findById.mockResolvedValue(team);
+
+      await expect(service.getTeamOrThrow(WORKSPACE, TEAM_ID)).resolves.toBe(team);
     });
   });
 });
