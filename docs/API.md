@@ -1,4 +1,4 @@
-# Management Service API (Phase 4)
+# Management Service API (Phase 6)
 
 Base URL: `http://localhost:3000` (local dev). All routes below return
 JSON. All routes except `GET /health` and `GET /health/ready` require
@@ -9,17 +9,21 @@ real user id via `npm run seed`. Every request/response also carries
 `X-Correlation-Id` (accepted if you supply a valid one, generated
 otherwise) - see "Correlation / observability" in `ARCHITECTURE.md`.
 
+CORS is enabled (Phase 6, for the `admin-ui/` browser app) for an
+explicit, configurable origin allow-list only - never a wildcard - see
+`ADMIN_UI_ORIGIN` in `.env.example` and `src/main.ts`.
+
 This document describes **Phase 3's REST surface (teams, memberships,
-projects, boards, work items) plus Phase 4's messaging additions**
-(the `GET /api/projects/:projectId/insights` query endpoint and
-extended `GET /health/ready` diagnostics). Each mutating endpoint below
-now also durably records the documented domain fact in the
-transactional outbox for asynchronous publication - see
+projects, boards, work items) plus Phase 4/5's messaging additions**
+(`GET /api/projects/:projectId/insights` and
+`GET /api/projects/:projectId/activity`, both now backed by the real
+Python Activity & Insights Service - see docs/ARCHITECTURE.md "Python
+inbox and projections") **plus Phase 6's admin-UI-driven additions**
+(`GET /api/users`, CORS). Each mutating endpoint below now also
+durably records the documented domain fact in the transactional
+outbox for asynchronous publication - see
 [`docs/EVENT_CATALOG.md`](EVENT_CATALOG.md) for exactly which endpoint
-emits which event. There is no admin UI yet, and no Python-side
-projection/insights data yet (Phase 5) - the insights endpoint always
-returns a typed `pending`/`unavailable`/`not_ready` response until a
-real responder exists.
+emits which event.
 
 ## Error envelope
 
@@ -82,6 +86,27 @@ Liveness only - never touches MongoDB or NATS: `{ "status": "ok", "service": "ma
   }
 }
 ```
+
+---
+
+## Users
+
+### `GET /api/users` (Phase 3 scaffold, documented in Phase 6)
+
+Read-only, workspace-scoped. Implemented since Phase 3
+(`src/identity/`) for exactly this purpose - populating assignee/
+reporter/member pickers in the future admin UI - but was not yet
+documented here until Phase 6 actually built that UI. No create/
+update/delete routes exist for users (seed-only - `npm run seed` - per
+`docs/ARCHITECTURE.md`'s Phase 3 scope).
+
+```json
+// 200 Response
+{ "items": [ { "id": "...", "workspaceId": "...", "name": "Alice Owner", "email": "alice@example.test", "createdAt": "..." } ] }
+```
+
+Sorted by `name`. Scoped to the caller's own workspace, same as every
+other list endpoint - never accepts a client-supplied `workspaceId`.
 
 ---
 
@@ -165,33 +190,57 @@ Changing `ownerId`/`teamId` re-validates the same-workspace/not-archived rules.
 
 Body: `{ "expectedVersion": 1 }`.
 
-### `GET /api/projects/:projectId/insights` (Phase 4)
+### `GET /api/projects/:projectId/insights` (Phase 4/5)
 
 Synchronous project insights, backed by Core NATS request/reply to the
-Activity & Insights Service (not implemented yet - Phase 5). 404 if
-the project doesn't exist in this workspace; otherwise always **200**
-with a typed `status`:
+real Python Activity & Insights Service. 404 if the project doesn't
+exist in this workspace; otherwise always **200** with a typed
+`status`:
 
 ```json
-// status: "ok" (once a real Python responder exists)
-{ "status": "ok", "data": { "projectId": "...", "generatedAt": "...", "workloadByAssignee": [...], "countsByStatus": [...], "lastProcessedSequence": 42 } }
+// status: "ok"
+{ "status": "ok", "data": { "projectId": "...", "generatedAt": "...", "workloadByAssignee": [{"assigneeId": "..." , "count": 1}], "countsByStatus": [{"columnId": "...", "count": 1}], "workloadByPriority": [{"priority": "HIGH", "count": 1}], "lastProcessedSequence": 42 } }
 ```
 ```json
-// status: "not_ready" - responder exists but projection isn't caught up yet
-{ "status": "not_ready", "reason": "..." }
+// status: "not_ready" - responder is up but has no projection data for this project yet (e.g. events haven't propagated yet, or a workspace mismatch)
+{ "status": "not_ready", "reason": "NO_DATA_YET_FOR_PROJECT" }
 ```
 ```json
 // status: "pending" - responder is subscribed but didn't reply within INSIGHTS_QUERY_TIMEOUT_MS
 { "status": "pending", "reason": "TIMEOUT" }
 ```
 ```json
-// status: "unavailable" - nothing is listening on the query subject (today's state - Phase 5 responder doesn't exist yet), or NATS itself is unreachable, or the reply was malformed
+// status: "unavailable" - nothing is listening on the query subject (the Python service is down), NATS itself is unreachable, or the reply was malformed
 { "status": "unavailable", "reason": "NO_RESPONDER" }
 ```
 
-Never blocks indefinitely (bounded by `INSIGHTS_QUERY_TIMEOUT_MS`,
-default 2000ms) and never 500s for these states - see
-`docs/ARCHITECTURE.md` "Core NATS request/reply" and TM-12.
+`workloadByPriority` is additive beyond the assignment's own named
+fields (`workloadByAssignee`/`countsByStatus`) - present whenever
+`status` is `"ok"`, safe to ignore if unused. Never blocks indefinitely
+(bounded by `INSIGHTS_QUERY_TIMEOUT_MS`, default 2000ms) and never
+500s for these states - see `docs/ARCHITECTURE.md` "Core NATS
+request/reply" and TM-12.
+
+### `GET /api/projects/:projectId/activity` (Phase 6)
+
+The project's real, asynchronously-built activity timeline (the admin
+UI's Activity screen), proxied over Core NATS request/reply to the
+same Python service, mirroring `insights` above exactly - same 404
+rule, same always-200-with-typed-status contract, same bounded
+timeout:
+
+```json
+// status: "ok"
+{ "status": "ok", "data": { "projectId": "...", "generatedAt": "...", "entries": [{ "eventId": "...", "eventType": "workitem.moved", "aggregateType": "WorkItem", "aggregateId": "...", "actorId": "...", "occurredAt": "..." }], "lastProcessedSequence": 42 } }
+```
+```json
+// status: "not_ready" | "pending" | "unavailable" - identical shape/reasons to insights above
+{ "status": "not_ready", "reason": "NO_DATA_YET_FOR_PROJECT" }
+```
+
+`entries` is newest-first (most recent activity at index 0), capped at
+50 by default (bounded, not paginated - a dev-tool-scale view, not an
+audit log replacement).
 
 ---
 

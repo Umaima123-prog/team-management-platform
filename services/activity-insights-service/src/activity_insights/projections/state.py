@@ -88,6 +88,13 @@ def _fields_for_event(envelope: EventEnvelope) -> dict[str, Any]:
             priority=payload.get("priority"),
             assigneeId=payload.get("assigneeId"),
             archived=False,
+            # Carried for human-readable activity rendering
+            # (messaging/activity_responder.py) - the only event that
+            # ever names an item's issueKey (docs/EVENT_CATALOG.md:
+            # workitem.assigned/moved/updated/archived never repeat
+            # it), so it is captured once here, from real event data,
+            # and never from a management_db read.
+            issueKey=payload.get("issueKey"),
         )
     elif event_type == "workitem.assigned":
         fields["assigneeId"] = payload.get("assigneeId")
@@ -140,3 +147,37 @@ class ItemStateRepository:
         new_doc = {**(existing or {}), **fields, "_id": item_id, "version": new_version}
         kind = ItemEventKind.FIRST_SEEN if existing is None else ItemEventKind.UPDATED
         return ItemEventOutcome(kind=kind, prior=existing, new=new_doc)
+
+    async def get_issue_keys(self, item_ids: list[str]) -> dict[str, str]:
+        """Bulk-resolve work-item ids to their issueKey, for
+        messaging/activity_responder.py's human-readable activity
+        labels. Reads only this service's own `item_state` projection
+        (itself built entirely from events) - never management_db."""
+        if not item_ids:
+            return {}
+        cursor = self._collection.find(
+            {"_id": {"$in": item_ids}, "issueKey": {"$ne": None}}, {"issueKey": 1}
+        )
+        return {doc["_id"]: doc["issueKey"] async for doc in cursor}
+
+    async def backfill_issue_key(self, item_id: str, issue_key: str) -> bool:
+        """Narrow, idempotent repair for documents projected before
+        issueKey capture existed on `workitem.created` (docs/
+        DECISIONS.md #30) - used only by backfill.py, against the
+        *real* `workitem.created` event's own payload (never a
+        fabricated value, never a management_db read).
+
+        Deliberately a read-then-maybe-write, same shape as
+        apply_event: sets *only* issueKey, never touches version/
+        columnId/priority/etc, never creates a document (a missing
+        document means this item's `created` event hasn't actually
+        been projected yet, which backfill.py should not paper over),
+        and never overwrites an issueKey that's already recorded. That
+        makes it safe to run against the same event, or the whole
+        stream, any number of times - once every existing document has
+        its issueKey, every subsequent run is a pure no-op."""
+        existing = await self._collection.find_one({"_id": item_id})
+        if existing is None or existing.get("issueKey"):
+            return False
+        await self._collection.update_one({"_id": item_id}, {"$set": {"issueKey": issue_key}})
+        return True

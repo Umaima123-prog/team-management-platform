@@ -15,6 +15,7 @@ fit together and what is/isn't implemented yet, and
 ├── services/
 │   ├── management-service/     # NestJS + TypeScript - owns management_db
 │   └── activity-insights-service/  # Python 3.12+ - owns insights_db
+├── admin-ui/                    # React + TypeScript - AdminLTE-style admin UI (Phase 6)
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── API.md                   # Management Service REST API reference
@@ -24,9 +25,6 @@ fit together and what is/isn't implemented yet, and
 ├── .env.example                 # docker-compose-level vars only
 └── .gitignore
 ```
-
-An `admin-ui/` (AdminLTE) directory is planned but not yet created -
-it is out of scope until the administration UI phase begins.
 
 ## Local infrastructure
 
@@ -46,6 +44,8 @@ connect to MongoDB Atlas via their own `.env` files (see each service's
   its own README/scripts for running locally.
 - [`services/activity-insights-service`](services/activity-insights-service) -
   see its [README](services/activity-insights-service/README.md).
+- [`admin-ui`](admin-ui) - the AdminLTE-style admin UI; see its own
+  [README](admin-ui/README.md) for running it locally.
 
 ## Status
 
@@ -85,4 +85,15 @@ connect to MongoDB Atlas via their own `.env` files (see each service's
   projections" and [`docs/TIMELOG.md`](docs/TIMELOG.md) Phase 5 notes
   for the automated and live-run evidence.
 
-**Not yet implemented**: the AdminLTE admin UI (Phase 6).
+- **Phase 6**: the admin UI (`admin-ui/`) - dashboard, teams
+  (create/members/roles), projects (create/status/dates), a real
+  Kanban board (drag/drop backed by the real move/assign API, with a
+  keyboard-accessible non-drag equivalent, optimistic-with-rollback
+  updates, and 409-conflict recovery), a work-item drawer (assignee
+  restricted to the project's owning team, matching the server's own
+  rule), the real asynchronous Activity timeline, and real Insights
+  with explicit ready/not-ready/pending/unavailable states. See
+  [`admin-ui/README.md`](admin-ui/README.md) and
+  [`docs/DECISIONS.md`](docs/DECISIONS.md) #23-26.
+
+**Not yet implemented**: Phase 7 (whatever comes next - not started).

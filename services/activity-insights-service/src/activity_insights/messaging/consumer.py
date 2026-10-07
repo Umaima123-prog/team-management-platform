@@ -80,7 +80,24 @@ class EventConsumer:
             while not stop_event.is_set():
                 try:
                     msgs = await sub.fetch(self._fetch_batch, timeout=self._fetch_timeout_s)
-                except nats.errors.TimeoutError:
+                except TimeoutError:
+                    # Deliberately the builtin TimeoutError, not just
+                    # nats.errors.TimeoutError: nats-py's internal
+                    # fetch loop (js/client.py's _fetch_n) sometimes
+                    # raises the bare builtin directly (e.g. via a
+                    # plain `raise asyncio.TimeoutError`, which in
+                    # Python 3.11+ *is* the builtin TimeoutError) when
+                    # the lingering-request deadline is already
+                    # exhausted - not always nats.errors.TimeoutError
+                    # (one of its own subclasses). Catching only the
+                    # subclass let a real idle-poll timeout escape
+                    # uncaught, which propagated through
+                    # asyncio.gather() and killed the entire process -
+                    # a real crash found live in this phase's manual
+                    # verification (see docs/DECISIONS.md #27). The
+                    # builtin is a superset catch: it also catches
+                    # every nats.errors.TimeoutError instance, since
+                    # that class subclasses it.
                     continue  # no messages available right now - normal idle poll
                 except nats.errors.ConnectionClosedError:
                     self._state_view.mark_connected(False)

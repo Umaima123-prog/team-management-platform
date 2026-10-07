@@ -5,6 +5,7 @@ import { generateEventId } from '../src/messaging/events/event-id';
 import { EventEnvelope, CURRENT_SCHEMA_VERSION } from '../src/messaging/events/envelope';
 import {
   ACTIVITY_INSIGHTS_DURABLE_CONSUMER,
+  PROJECT_ACTIVITY_QUERY_SUBJECT,
   PROJECT_INSIGHTS_QUERY_SUBJECT,
   TEAM_EVENTS_STREAM_NAME,
 } from '../src/messaging/events/subjects';
@@ -14,6 +15,7 @@ import { OutboxRelayService } from '../src/messaging/relay/outbox-relay.service'
 import { OutboxEventDocument } from '../src/messaging/outbox/outbox.schema';
 import { OutboxRepository } from '../src/messaging/outbox/outbox.repository';
 import { InsightsClientService } from '../src/messaging/insights/insights-client.service';
+import { ActivityClientService } from '../src/messaging/activity/activity-client.service';
 
 /**
  * REAL local NATS JetStream integration suite - no mocks on the
@@ -414,6 +416,56 @@ describe('NATS JetStream integration (real local server)', () => {
 
       expect(result).toEqual({ status: 'pending', reason: 'TIMEOUT' });
       expect(elapsedMs).toBeLessThan(2000); // never blocks indefinitely
+    }, 10_000);
+  });
+
+  describe('Core NATS request/reply (project activity, Phase 6)', () => {
+    it('returns "ok" when a real stub responder answers on the documented subject', async () => {
+      const sub = rawConnection.subscribe(PROJECT_ACTIVITY_QUERY_SUBJECT);
+      const responderLoop = (async () => {
+        for await (const msg of sub) {
+          const request = JSON.parse(new TextDecoder().decode(msg.data)) as { projectId: string };
+          const response = {
+            status: 'ok',
+            data: {
+              projectId: request.projectId,
+              generatedAt: new Date().toISOString(),
+              entries: [
+                {
+                  eventId: 'evt-1',
+                  eventType: 'workitem.created',
+                  aggregateType: 'WorkItem',
+                  aggregateId: 'wi-1',
+                  actorId: 'u1',
+                  occurredAt: new Date().toISOString(),
+                },
+              ],
+              lastProcessedSequence: 1,
+            },
+          };
+          msg.respond(new TextEncoder().encode(JSON.stringify(response)));
+        }
+      })();
+
+      const client = new ActivityClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+      const result = await client.getProjectActivity('proj-stub-1', 'ws-1', 'corr-stub-1');
+
+      sub.unsubscribe();
+      await responderLoop;
+
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.data.projectId).toBe('proj-stub-1');
+        expect(result.data.entries).toHaveLength(1);
+      }
+    }, 10_000);
+
+    it('returns "unavailable"/NO_RESPONDER immediately when nothing is subscribed', async () => {
+      const client = new ActivityClientService(nats, fakeConfig({ INSIGHTS_QUERY_TIMEOUT_MS: '2000' }));
+
+      const result = await client.getProjectActivity('proj-no-responder', 'ws-1', 'corr-stub-2');
+
+      expect(result).toEqual({ status: 'unavailable', reason: 'NO_RESPONDER' });
     }, 10_000);
   });
 });

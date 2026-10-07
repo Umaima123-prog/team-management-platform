@@ -18,6 +18,7 @@ phase so slippage is visible early rather than discovered at hour 19.
 | 4d    | Second independent live verification re-run by the user (same setup as 4c), plus a manual cross-check of the PubAck evidence - confirms reproducibility, not a one-off pass | 2026-10-07 (same session, immediately after 4c) | 2026-10-07 | not separately timestamped by the user | 13/13 checks passed again; stream sequence 45 (correctly advanced from 44, as expected for a new publish). **Phase 4 marked VERIFIED END-TO-END.** See notes below. |
 | 5     | Activity & Insights Service (Python): envelope validation, inbox dedup, version-gated item_state, activity/workload projections, bounded retry + poison path, real Core NATS responder, consumer-state health, replay script, tests, docs | 2026-10-07 ~11:10 PST | 2026-10-07 ~12:25 PST | ~1h 15m (approximate - not individually stamped at task start) | Three real bugs found and fixed live against real Atlas + real NATS (shared-MongoClient-session; inbox/processing_failures missing namespace support; a transaction-poisoning upsert-conflict pattern that caused a real multi-minute hang) - see notes below and `docs/DECISIONS.md` #17-20. Full real backlog (45 messages) processed cleanly after fixes - see notes. |
 | 5a    | Final live end-to-end workload verification (real NestJS API + real Atlas + real NATS + real Python consumer, fresh team/project/work items) and an `ack_wait` documentation-vs-deployed-config re-check | 2026-10-07 ~12:30 PST | 2026-10-07 ~12:40 PST | ~0h 10m | Non-zero workload counts confirmed correct and non-duplicated end to end; the earlier "ack_wait drift" note was itself found to be a misdiagnosis and corrected - see notes below and `docs/DECISIONS.md` #21. |
+| 6     | Admin UI (`admin-ui/`): dashboard, teams, projects, Kanban board (drag/drop + keyboard move, optimistic-with-rollback, 409 recovery, filters, WIP badge), work-item drawer (team-restricted assignee), real activity timeline, real insights, sign-in gate, tests | 2026-10-07 ~13:15 PST | 2026-10-07 ~14:00 PST | ~0h 45m (approximate) | Two new minimal backend additions (`GET /api/projects/:id/activity`, documented `GET /api/users`); one real frontend bug found and fixed by its own test (sign-in gate flashing protected content for a stale id); one real **Phase 5** backend bug found live (the Python consumer crashing on an idle-poll timeout) and fixed with a regression test - see notes below and `docs/DECISIONS.md` #22-27. |
 
 Add a new row per phase - do not overwrite history.
 
@@ -624,3 +625,272 @@ code for.
 Full automated suite (`pytest`, 42/42), `ruff check`, and `mypy src`
 re-confirmed clean after this session (no source changes this round -
 verification and documentation only). Nothing committed or pushed.
+
+### Phase 6 notes (Admin UI)
+
+Audited the existing repo/APIs first (per instruction) and found two
+things worth noting before writing any UI code:
+
+- `GET /api/users` (`src/identity/`) **already existed**, built in
+  Phase 3 with the comment "for the future UI", but was never
+  documented in `docs/API.md` and had no tests. Documented it and
+  added `users.repository.spec.ts`/`users.controller.spec.ts` (13 new
+  assertions) - this is filling a real documentation/test gap, not
+  adding a new capability.
+- There was **no existing endpoint** returning a per-event activity
+  list (only aggregate `insights`), but the brief requires an Activity
+  screen showing "actor, time, action, affected item, chronological
+  ordering" sourced from "existing backend APIs". Added
+  `GET /api/projects/:projectId/activity`, mirroring `insights`'s Core
+  NATS request/reply pattern exactly (`ActivityClientService`
+  server-side, a new `ActivityResponder` on the Python side reading
+  the same real `activity_projection` the consumer already writes) -
+  see `docs/DECISIONS.md` #22. 7 new NestJS unit tests
+  (`activity-client.service.spec.ts`) + 2 new real-NATS e2e tests
+  (stub-responder ok / no-responder) + 4 new Python unit tests
+  (`test_activity_responder.py`).
+
+Also added `app.enableCors()` (`src/main.ts`, explicit
+`ADMIN_UI_ORIGIN` allow-list, no wildcard, no credentials -
+`docs/DECISIONS.md` #26) - required for the browser-based UI to reach
+the API at all, since no prior phase had any cross-origin caller.
+
+Built `admin-ui/` (React + TypeScript + Vite + Vitest/React Testing
+Library, hand-rolled AdminLTE-style CSS over Bootstrap 5 rather than
+the real jQuery-coupled `admin-lte` package - `docs/DECISIONS.md` #23):
+a sign-in gate (`docs/DECISIONS.md` #24), Dashboard, Teams
+(create/members/roles), Projects (create/status/dates/link to board),
+a Kanban board (drag/drop + keyboard move, optimistic-with-rollback +
+409 recovery - `docs/DECISIONS.md` #25, filters, WIP badge), a
+work-item drawer (team-restricted assignee, matching not replacing the
+server check), an Activity panel, and an Insights panel with explicit
+ready/not_ready/pending/unavailable states.
+
+**Automated test suite**: 29 Vitest + React Testing Library tests
+across 11 files - teams create/validation-error, project creation,
+board rendering/column-order/WIP-badge, filters (re-request with query
+params), move command behavior (`expectedVersion` sent, optimistic
+position kept only after success, rollback on non-conflict failure,
+409 triggers a full board refresh with a clear message), keyboard/
+non-drag reordering (up/down buttons, disabled-state-correctly-not-
+focusable), invalid-assignee handling (UI restricts the picker to team
+members, and a forced/bypassed choice still gets the real server 400
+message), team member add/role-update/remove, activity rendering
+(chronological order, actor/action/item), insights ready/not_ready/
+pending/unavailable states, item-drawer accessibility (aria-modal,
+focus-on-open, Escape-to-close, every field labeled), and the sign-in
+gate (including its own regression test, below). `npm run build`
+(`tsc -b && vite build`) and `npm run lint` (oxlint) both clean -
+2 pre-existing stylistic warnings only (`react/only-export-components`
+fast-refresh advice, `react/purity` on a `Date.now()` freshness
+comparison), no errors.
+
+**Real bug #1, found by its own test**: an earlier `CurrentUserContext`
+used a boolean (`isSignedIn = currentUserId !== null`) to gate the
+app shell. `SignInGate.test.tsx`'s second test (re-run after the
+first test's real sign-in had written to `localStorage`) immediately
+showed "Protected content" even though that test's own mock rejected
+every id with 401 - proving the gate would flash real content for a
+stale/invalid stored id on a genuine page reload before the async
+re-validation caught up and reverted it. Fixed by making `status` a
+real three-state machine (`checking`/`signed-out`/`signed-in`) -
+`checking` is a loading state, never a pass-through - and adding a
+dedicated regression test plus `afterEach(() => localStorage.clear())`
+test hygiene. Full root cause in `docs/DECISIONS.md` #24.
+
+**Found and fixed while writing tests (not "bugs" at runtime, since
+nothing shipped with them, but real mistakes caught before they
+could)**: several ambiguous RTL queries (`getByText('ENG1-1', {exact:
+false})` also matching a card's own hidden "Move ENG1-1 to column"
+label; `getByRole('status')` matching the loading spinner, which also
+uses that role, instead of the intended not-ready message; `.focus()`
+asserted on a `disabled` button, which browsers correctly never give
+focus to) - all fixed by querying more specifically
+(`data-testid`, `findByText` after confirming load finished, filtering
+to enabled controls only), not by weakening the component being
+tested.
+
+**Live verification against the real stack** (real Management
+Service, restarted to pick up the CORS/activity-route changes; real
+Python service; real Atlas; real local NATS; `admin-ui`'s Vite dev
+server actually running on `:5173`) - no browser-automation tool was
+available this session, so the full workflow was driven via direct
+HTTP calls using the exact same endpoints/headers/payload shapes
+`admin-ui`'s API client sends (verified by reading `src/api/
+endpoints.ts` alongside each call), with `Origin: http://localhost:5173`
+set to also prove the real CORS preflight succeeds
+(`Access-Control-Allow-Origin: http://localhost:5173` confirmed via a
+real `OPTIONS` request) - the component-level rendering of these exact
+responses is separately covered by the Vitest suite above, which does
+render real React components into a real DOM:
+
+1. Created a real team, added two real members with different roles,
+   created a real project owned by the same workspace, fetched its
+   real board (5 default columns).
+2. Created a real work item (assigned to one member), reassigned it to
+   a different real team member, moved it to a different real column -
+   three real domain events per the pattern established in Phase 4/5.
+3. Waited for the already-running Python consumer to catch up (`GET
+   /health/consumer` advanced to the new real stream sequence within
+   seconds, no restart needed).
+4. `GET /api/projects/:id/activity` returned all 6 real events for
+   that project (`project.created`, `project.team_assigned`,
+   `board.created`, `workitem.created`, `workitem.assigned`,
+   `workitem.moved`), newest-first, actor/time/type all real.
+5. `GET /api/projects/:id/insights` showed genuinely non-zero,
+   non-duplicated workload: the reassigned-away member's count
+   correctly dropped to **0** (not absent, not negative - the
+   decrement-on-reassignment design from `docs/DECISIONS.md` #17,
+   confirmed on fresh live data for the first time since Phase 5a used
+   only pre-existing test-fixture data), the new assignee's count was
+   **1**, the old column's count dropped to **0**, the new column's
+   count was **1**.
+6. Separately confirmed the two critical error paths live, exactly as
+   `admin-ui`'s error handling expects them: assigning a user outside
+   the team's own membership → real `400 VALIDATION_ERROR` ("assigneeId
+   must be an active member of this project's owning team."); a move
+   sent with a stale `expectedVersion` → real `409 CONFLICT` with
+   `details.currentVersion` populated.
+7. Archived the verification team and project afterward (soft-delete,
+   same as every prior phase's live-verification data).
+
+**Real bug #2, found live, in Phase 5 code (not Phase 6's own
+code)**: partway through re-running the full regression suite with
+the long-running Python service from Phase 5a/6 verification still up,
+that process crashed entirely with an unhandled `asyncio.TimeoutError`
+- not during any request/response work, but from its own idle-poll
+loop finding no new messages on an otherwise-quiet stream. Traced to
+`nats-py`'s installed source: `js/client.py`'s `_fetch_n` sometimes
+raises the *bare builtin* `TimeoutError` directly (not always wrapped
+in its own `nats.errors.TimeoutError` subclass), which
+`messaging/consumer.py`'s `run_forever` only caught as
+`nats.errors.TimeoutError` - the subclass, which does not match an
+instance of the parent class raised directly. The escaped exception
+propagated through `asyncio.gather()` in `main.py` and killed every
+other task in the process (the health HTTP server, both responders),
+not just the consumer loop - a crashed-and-never-restarted consumer is
+exactly the kind of silent failure the whole messaging-reliability
+design exists to avoid. Fixed by catching the builtin `TimeoutError`
+instead (a strict superset - it still catches
+`nats.errors.TimeoutError` instances too, since that class subclasses
+the builtin) in both `messaging/consumer.py` and `replay.py`'s
+matching fetch loop. Added a deterministic regression test
+(`test_run_forever_survives_a_raw_builtin_timeout_error_from_an_idle_fetch`)
+that reproducibly fails against the old clause and passes against the
+fix - verified both directions before moving on, not just "added a
+test and assumed it covers the bug." Full root cause in
+`docs/DECISIONS.md` #27. Python suite re-confirmed clean afterward:
+47/47 (up from 46 - the one new regression test), `ruff`/`mypy` clean.
+
+**Not verified this round (honest gaps)**: no literal browser/GUI
+click-through was performed (no browser-automation tool was available
+in this session) - the claims above are "the real backend behaves
+exactly as the UI code expects, proven with the UI's own exact request
+shapes" plus "the UI's real React components render those exact
+response shapes correctly, proven by Vitest+RTL", not "a human/agent
+visually watched it in Chrome." Drag-and-drop's native HTML5
+`dataTransfer` behavior specifically is exercised in the test suite
+via `fireEvent`-level drag events, not a real OS-level drag gesture -
+the keyboard/non-drag path (required to exist regardless) is the one
+exercised identically to how a real user would operate it. Responsive
+layout below 768px is implemented (`src/styles/app.css`'s mobile
+sidebar rules) but only visually verifiable in a real browser, which
+this session did not have.
+
+No changes to `management_db`'s/`insights_db`'s existing collections'
+schemas, no changes to any already-shipped Phase 1-5 business logic,
+no `.env` secret values read, printed, or committed. Nothing committed
+or pushed.
+
+### Phase 6 follow-up: two bugs from the user's own manual Chrome verification
+
+The user completed the manual browser verification Phase 6's own
+report asked for (no browser tool was available to this session) and
+reported two real bugs, both fixed this round:
+
+1. **Mobile sidebar (<768px)**: stayed open/full-width, squeezing main
+   content. Root-caused to two real issues: the fixed-position
+   sidebar relied on a negative `margin-left` with no explicit
+   `top`/`left`/`bottom` (ambiguous inset-resolution across layout
+   contexts), and the Vite scaffold's leftover default `src/index.css`
+   (a centered fixed-width `#root` with marketing-page heading styles)
+   was never removed and was fighting the real layout. Fixed with
+   explicit insets, a backdrop (click-to-close), auto-close-on-
+   navigate, and deleting the scaffold CSS residue. `Shell.test.tsx`
+   (3 new tests) covers the behavioral contract (class toggling,
+   backdrop, auto-close) - jsdom cannot evaluate `@media` queries or
+   real layout, so the visual result still needs the user's own eyes.
+   See `docs/DECISIONS.md` #28.
+2. **Activity showed raw WorkItem ids** ("moved WorkItem 6ac5...").
+   Fixed by capturing `issueKey` (the only per-item identifier any
+   event ever names) from `workitem.created`'s own payload into
+   `item_state`, and resolving it server-side for every WorkItem
+   activity entry - never a management_db read, and never a
+   fabricated title (this project's events deliberately never carry
+   free-text content - a pre-existing, deliberate design rule this fix
+   does not violate just to make one screen prettier). 2 new
+   `test_activity_responder.py` tests, a new `test_item_state.py` (3
+   tests), and a new `ActivityPanel.test.tsx` test. See
+   `docs/DECISIONS.md` #29.
+
+**Full re-verification**: `pytest` 51 passed, 1 skipped (the real-Atlas
+regression test - Atlas was transiently unreachable from this
+environment during this session, the same class of local-network
+condition documented in `docs/DECISIONS.md` #11, unrelated to this
+round's code changes; confirmed independently via a direct Python
+ping, not just the one test) - `ruff`/`mypy` clean. `admin-ui`: 33
+Vitest tests passed (12 files, up from 11), `npm run build` clean,
+`npm run lint` clean (one new stylistic-only warning on the
+navigation-closes-on-route-change effect, same category as two
+pre-existing ones - not an error). NestJS: 169 unit + 16 real-NATS e2e
+tests, all passed. `git diff --check` clean (CRLF notices only).
+
+This session also found Docker Desktop itself had stopped (and with
+it, the local NATS container and both long-running service processes)
+between the end of the prior session and this one - restarted it,
+confirmed the file-backed JetStream stream/consumer data survived,
+and restarted the Management Service and `admin-ui` dev server. The
+Python service was **not** restarted this round: Atlas was still
+unreachable when this session ended, and starting it against an
+unreachable database would not have added anything verifiable.
+
+No changes to `management_db`'s/`insights_db`'s schemas beyond the
+additive `issueKey` field on `item_state` (Phase 5's own collection),
+no changes to Phase 1-5 business logic otherwise, no `.env` secret
+values read/printed/committed. Nothing committed or pushed.
+
+**Phase 6 follow-up #2: the user's re-verification still showed raw
+WorkItem ids - the prior fix was necessary but not sufficient.**
+Diagnosed by directly inspecting the real `insights_db.item_state`
+collection: all 3 real WorkItem documents had no `issueKey` field,
+confirming the prior fix only affects events processed going forward,
+not documents already projected by the old code (`apply_event`'s
+version gate correctly treats a redelivered same-version `created`
+event as STALE - see `docs/DECISIONS.md` #30 for the full mechanism).
+
+Added `activity_insights/backfill.py`, a narrow one-off script (never
+an HTTP endpoint): a new JetStream consumer filtered to only
+`tm.v1.workitem.created`, reading each event's real `issueKey` and
+calling a new `ItemStateRepository.backfill_issue_key`, which only
+ever fills in a *missing* issueKey on an *existing* document - never
+creates one, never overwrites one, never touches any other field.
+Never reads/writes `management_db`. 7 new tests (`test_item_state.py`
++3, new `test_backfill.py` with 3 unit tests for the extracted
+per-event decision logic). Ran it against the real stream: 16
+`workitem.created` events seen, 3 documents updated (exactly the 3
+real WorkItems found missing `issueKey`).
+
+**Verification**: direct `tm.query.v1.project_activity` NATS request
+and the real `GET /api/projects/:id/activity` HTTP endpoint (with a
+valid `X-Dev-User-Id`) both now return `issueKey: "PH5VER-1"` /
+`"PH5VER-2"` on every WorkItem entry instead of `null`. `pytest`: 58
+passed (up from 51), `ruff`/`mypy` clean. `admin-ui`: 33 Vitest tests
+still passing (frontend code unchanged this round - `ActivityPanel`
+already consumed `issueKey` correctly once the API started returning
+it). Nothing committed or pushed; Phase 7 not started.
+
+**USER-MANUALLY VERIFIED in Chrome (both items PASS, per the user's own report):**
+- Responsive mobile layout at ~390px (sidebar/hamburger/backdrop behavior - `docs/DECISIONS.md` #28).
+- Activity entries show human-readable issue keys (`PH5VER-1` / `PH5VER-2`) instead of raw WorkItem database IDs (`docs/DECISIONS.md` #29, #30).
+
+**Phase 6 is complete.** Nothing committed or pushed. Phase 7 not started.

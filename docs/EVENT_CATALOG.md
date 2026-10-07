@@ -201,3 +201,4 @@ asserting one number that doesn't match observed behavior.
 | Subject | Caller | Responder | Notes |
 |---|---|---|---|
 | `tm.query.v1.project_insights` | NestJS BFF (`GET /api/projects/:projectId/insights`) | Python service (real responder, Phase 5 - stubbed only in Phase 4's own integration tests) | Core NATS, not JetStream (see `docs/DECISIONS.md` #2). Bounded timeout (`INSIGHTS_QUERY_TIMEOUT_MS`, default 2s), typed `pending`/`unavailable`/`not_ready` fallback - never blocks indefinitely. |
+| `tm.query.v1.project_activity` | NestJS BFF (`GET /api/projects/:projectId/activity`) | Python service (real responder, Phase 6) | Same contract as `project_insights` above (added for the admin UI's Activity screen, docs/DECISIONS.md #22) - reads `activity_projection`, never a different/synthesized source. |

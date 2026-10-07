@@ -4,6 +4,8 @@ import { RequestContext } from '../common/context/request-context';
 import { withId } from '../common/mongo/with-id.util';
 import { InsightsClientService } from '../messaging/insights/insights-client.service';
 import { InsightsQueryOutcome } from '../messaging/insights/insights.types';
+import { ActivityClientService } from '../messaging/activity/activity-client.service';
+import { ActivityQueryOutcome } from '../messaging/activity/activity.types';
 import { ArchiveProjectDto } from './dto/archive-project.dto';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
@@ -14,6 +16,7 @@ export class ProjectsController {
   constructor(
     private readonly projectsService: ProjectsService,
     private readonly insightsClient: InsightsClientService,
+    private readonly activityClient: ActivityClientService,
   ) {}
 
   @Post()
@@ -84,5 +87,21 @@ export class ProjectsController {
   ): Promise<InsightsQueryOutcome> {
     await this.projectsService.getProjectOrThrow(ctx.workspaceId, projectId);
     return this.insightsClient.getProjectInsights(projectId, ctx.workspaceId, ctx.correlationId);
+  }
+
+  /**
+   * Phase 6 admin UI's Activity screen: the project's real,
+   * asynchronously-built activity timeline, proxied over Core NATS
+   * request/reply exactly like `insights` above - never a direct
+   * browser read of insights_db, never a different contract shape.
+   * Always 200 with a typed status; only an unknown projectId is 404.
+   */
+  @Get(':projectId/activity')
+  async activity(
+    @CurrentContext() ctx: RequestContext,
+    @Param('projectId') projectId: string,
+  ): Promise<ActivityQueryOutcome> {
+    await this.projectsService.getProjectOrThrow(ctx.workspaceId, projectId);
+    return this.activityClient.getProjectActivity(projectId, ctx.workspaceId, ctx.correlationId);
   }
 }

@@ -5,6 +5,7 @@ import { OutboxRepository } from './outbox/outbox.repository';
 import { OutboxService } from './outbox/outbox.service';
 import { OutboxRelayService } from './relay/outbox-relay.service';
 import { InsightsClientService } from './insights/insights-client.service';
+import { ActivityClientService } from './activity/activity-client.service';
 import { MessagingHealthService } from './health/messaging-health.service';
 
 /**
@@ -23,6 +24,7 @@ import { MessagingHealthService } from './health/messaging-health.service';
     OutboxService,
     OutboxRelayService,
     InsightsClientService,
+    ActivityClientService,
     MessagingHealthService,
   ],
   exports: [
@@ -31,6 +33,7 @@ import { MessagingHealthService } from './health/messaging-health.service';
     OutboxRepository,
     OutboxService,
     InsightsClientService,
+    ActivityClientService,
     MessagingHealthService,
   ],
 })

@@ -1,0 +1,15 @@
+/* Minimal global reset - the Vite React template's default content
+ * here (a centered #root, large display headings, decorative
+ * borders/fonts for a marketing-style landing page) was never
+ * appropriate for this app and was accidentally left in place; it
+ * was fighting the real app-shell layout in styles/app.css (a
+ * contributing cause of the mobile sidebar/layout bug reported in
+ * Phase 6 verification - see docs/DECISIONS.md #28). */
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}

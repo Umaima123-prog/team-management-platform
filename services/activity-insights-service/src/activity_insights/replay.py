@@ -44,7 +44,6 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-import nats.errors
 import nats.js.errors
 from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy
 
@@ -118,7 +117,11 @@ async def run_replay(
         while True:
             try:
                 msgs = await sub.fetch(10, timeout=idle_timeout_s)
-            except nats.errors.TimeoutError:
+            except TimeoutError:
+                # The builtin, not just nats.errors.TimeoutError - see
+                # messaging/consumer.py's run_forever for why this
+                # specific broadening matters (a real crash found live
+                # this phase, docs/DECISIONS.md #27).
                 break  # caught up - no more history pending for this consumer
             for msg in msgs:
                 await consumer.handle_message(msg)

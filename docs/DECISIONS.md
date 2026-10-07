@@ -633,3 +633,351 @@ worth the risk of touching Phase 4 Management Service code for a
 no-op edit; re-diagnosing this as a bug a second time without first
 isolating the mechanism with a controlled probe (the lesson applied
 here, and the thing the first pass skipped).
+
+## 22. A new `tm.query.v1.project_activity` Core NATS query, mirroring `project_insights` exactly, rather than reusing/overloading an existing contract (Phase 6)
+
+**Decision:** Added a second Core NATS request/reply subject,
+`tm.query.v1.project_activity`, with its own NestJS BFF route
+(`GET /api/projects/:projectId/activity`) and Python responder
+(`ActivityResponder`), instead of (a) extending
+`tm.query.v1.project_insights`'s existing response shape to also carry
+an activity list, or (b) giving the admin UI a different way to reach
+`activity_projection` (e.g. a direct Mongo/HTTP read of insights_db).
+
+**Why:** The Phase 6 brief requires an Activity screen showing
+"actor, time, action, affected item, chronological ordering" sourced
+from "existing backend APIs" - but no existing endpoint returned a
+list of individual events; `project_insights` returns only aggregate
+counts, by design (docs/ARCHITECTURE.md "Core NATS request/reply").
+Overloading `project_insights`'s response to also carry a growing
+entries array would conflate two different query shapes (aggregate
+counts vs. a timeline) behind one contract and one timeout budget, and
+would force every existing consumer of the insights response (the
+NestJS controller, the Phase 4/5 tests, `docs/API.md`'s documented
+shape) to account for a field they don't use. A second subject,
+following the established pattern byte-for-byte (same bounded-
+timeout/typed-fallback contract, same "Python answers, NestJS proxies,
+browser never talks to NATS or insights_db directly" shape), is the
+smallest change that is actually consistent with how this system
+already does synchronous cross-service reads - not a new integration
+style, not a weakening of the "browser never reads insights_db
+directly" rule (docs/ARCHITECTURE.md "Trust boundary"), which this
+still fully respects.
+
+**Rules out:** a direct database read from the browser or from NestJS
+into `insights_db` (violates service ownership - only the Python
+service may read/write its own database); a WebSocket/SSE push
+mechanism for "real-time" activity (not asked for, and a materially
+different reliability/backpressure story than this project's existing
+bounded-request-response pattern); paginating `entries` beyond a
+bounded `limit` (dev-tool scale, not an audit-log product - unbounded
+pagination was not asked for and would need its own cursor contract).
+
+## 23. Admin UI stack: React + TypeScript + Vite with hand-rolled AdminLTE-style CSS, not the real `admin-lte` npm package (Phase 6)
+
+**Decision:** `admin-ui/` is a React + TypeScript app (Vite, Vitest +
+React Testing Library), styled with a small hand-written CSS file
+(`src/styles/app.css`) layered on Bootstrap 5, reproducing AdminLTE's
+visual language (dark sidebar, topbar, boxed content cards, small-box
+dashboard stat widgets) rather than installing the real `admin-lte`
+npm package.
+
+**Why:** Real AdminLTE ships as server-rendered HTML/CSS plus jQuery
+plugins that directly mutate the DOM (sidebar collapse, treeview,
+select2, etc.) - a model that actively fights React's virtual-DOM
+ownership of the same elements, and the assignment's own Phase 6
+requirements (meaningful tests for board rendering, drag/move
+behavior, filters, keyboard navigation, accessibility) are
+substantially harder to write and trust against jQuery-plugin-driven
+markup than against plain React components. A component framework
+with a real testing library (React Testing Library) is what makes
+`BoardView.test.tsx`'s optimistic-move/409/rollback assertions and
+`ItemDrawer.a11y.test.tsx`'s focus/Escape assertions possible at all
+without a real browser. AdminLTE is explicitly a *visual* reference in
+the assignment ("AdminLTE administration UI") - nothing requires the
+literal jQuery implementation.
+
+**Rules out:** importing `admin-lte`'s JS bundle alongside React (two
+different, uncoordinated systems fighting over the same DOM nodes -
+a well-known source of hard-to-debug bugs); a server-rendered
+(Nunjucks/EJS) admin UI living inside the NestJS service itself
+(would blur "Management Service owns the authoritative API" with
+"Management Service also renders admin HTML," and still wouldn't get
+jQuery-plugin behavior load-bearing-tested any more easily).
+
+## 24. Sign-in is "enter a known user id," not a fake login, and is a three-state machine (Phase 6)
+
+**Decision:** `CurrentUserContext`/`SignInGate` require the operator to
+enter a real, already-existing user id once (there is no anonymous
+`GET /api/users` to bootstrap a picker from - and this UI must never
+add one, since that would weaken the existing trust model for every
+other client too). `status` is `'checking' | 'signed-out' |
+'signed-in'`, not a boolean derived from "is there an id in
+localStorage" - a stored id is only a *candidate* until
+`GET /api/users` actually confirms it.
+
+**Why:** The three-state design is not incidental - an earlier,
+boolean (`isSignedIn = currentUserId !== null`) version had a real
+bug, caught by `SignInGate.test.tsx` the first time a test reused a
+previous test's `localStorage` state: the gate rendered protected
+content immediately on a stored id, then only asynchronously
+discovered (and reverted) that the id was invalid - meaning on a real
+page reload with a since-deleted or never-valid stored id, a user
+would briefly see the real app shell before being bounced back to the
+sign-in form. `status === 'checking'` closes that window entirely:
+protected content is only ever rendered once `GET /api/users` has
+actually succeeded for the id in question, whether that happens via a
+fresh manual sign-in or via rehydrating a stored one.
+
+**Rules out:** treating "there is a value in localStorage" as
+equivalent to "signed in" (the bug above); a hardcoded demo user
+(would misrepresent a multi-user workspace and couldn't exercise the
+real per-user `X-Dev-User-Id` trust mechanism the assignment is
+actually testing); adding a backend "list users anonymously" endpoint
+to make first-run easier (a real weakening of the existing trust
+model's one rule - every route but health checks requires a known
+user - for this UI's convenience).
+
+## 25. Board moves are optimistic-with-rollback, never optimistic-without-verification (Phase 6)
+
+**Decision:** `useBoardItems.ts`'s `moveItem` is the single function
+every move path (drag/drop, the keyboard "Move to…" select, the
+keyboard up/down reorder buttons) calls. It (1) applies the move to
+local state immediately, marking the item `pending`, (2) sends
+`expectedVersion` and the computed `targetColumnId`/`beforeItemId`/
+`afterItemId` to the real `POST /api/items/:itemId/move`, (3) on
+success, replaces the optimistic guess with the server's own returned
+item, (4) on any other failure, rolls back to the pre-move snapshot,
+and (5) on a 409 specifically, discards local state entirely and
+refetches the whole board+items from the server, with a message that
+names the conflict rather than a generic failure toast.
+
+**Why:** A pure "fire the request and trust the UI already shows the
+right thing" approach (no rollback) would let the board visibly lie
+about state the server rejected. A non-optimistic approach (wait for
+the server before moving anything visually) would make every drag feel
+laggy for no correctness benefit in the common case. Optimistic
+with verified rollback gets both: responsive drag/drop, and a board
+that can never diverge from server truth for longer than one round
+trip - and never silently; a 409 is common in exactly the "someone
+else is using the same board right now" scenario a multi-user Kanban
+tool must expect, so it gets its own, more thorough recovery
+(full refetch, not just "put this one card back") rather than being
+treated like any other error.
+
+**Rules out:** mutating board state anywhere outside `moveItem`
+(every drag handler, keyboard handler, and the create-item form all
+funnel through the same repository-shaped hook, never their own
+`setItems` calls); treating a 409 the same as a 500 (a 409 means
+"your local view is stale," which specifically calls for a refetch,
+not a retry of the same now-known-wrong request).
+
+## 26. CORS is an explicit, non-wildcard origin allow-list, never credentialed (Phase 6)
+
+**Decision:** `app.enableCors({ origin: adminUiOrigins, ... })` in
+`src/main.ts`, where `adminUiOrigins` comes from `ADMIN_UI_ORIGIN`
+(comma-separated, default `http://localhost:5173`) - never
+`origin: true`/`'*'`, and no `credentials: true` (no cookies are
+involved anywhere in this system's trust model - `X-Dev-User-Id` is a
+header the client sets explicitly, not an ambient credential a
+different origin's page could ride along for free).
+
+**Why:** This is the first time this API has ever accepted
+cross-origin requests (every prior phase only had same-origin tooling
+- curl, supertest, Postman - call it). Enabling CORS is necessary for
+the browser-based admin UI to function at all, but must not become a
+general weakening of the API's exposure: an explicit allow-list means
+an arbitrary website cannot call this API from a victim's browser,
+and the absence of `credentials: true` means there is no ambient
+authority (cookies) for CORS to even need to protect here in the first
+place - the actual authority (`X-Dev-User-Id`) must be deliberately
+set by whatever code is making the request, same as every curl example
+already in `docs/API.md`.
+
+**Rules out:** a wildcard origin (would let any website make
+authenticated-shaped requests on a user's behalf if they ever guessed
+or phished a user id); enabling `credentials: true` (not needed - would
+only add risk for a trust mechanism that isn't cookie-based anyway).
+
+## 27. `EventConsumer`/`replay.py` catch the builtin `TimeoutError` on an idle fetch, not just `nats.errors.TimeoutError` (Phase 5 code, found live during Phase 6)
+
+**Decision:** `messaging/consumer.py`'s `run_forever` and `replay.py`'s
+fetch loop both catch the builtin `TimeoutError` on an empty
+`sub.fetch()` result, not `nats.errors.TimeoutError` specifically.
+
+**Why:** Found live, by accident, during this phase's manual
+verification: the long-running Python service (left running from
+Phase 5's own verification) crashed entirely partway through - not
+during any of the request/response work being verified, but from its
+own idle-poll loop finding no new messages. The traceback showed a
+bare `asyncio.exceptions.TimeoutError` (not `nats.errors.TimeoutError`)
+raised from inside `nats-py`'s own `js/client.py` (`_fetch_n`'s
+"second request: lingering request" path, which does
+`raise asyncio.TimeoutError` directly when its deadline is already
+exhausted) propagating out of `sub.fetch()`, out of `run_forever`'s
+`except nats.errors.TimeoutError` clause (which does not match it -
+`nats.errors.TimeoutError` is a *subclass* of the builtin, so catching
+the subclass does not catch the parent class raised directly), out of
+the task, and through `asyncio.gather(*tasks)` in `main.py` - which
+kills every other task (the health HTTP server, the responders)
+too, not just the consumer loop. Confirmed by direct inspection of
+`nats-py`'s installed source (the exact `raise asyncio.TimeoutError`
+line) and reproduced deterministically in a unit test
+(`test_run_forever_survives_a_raw_builtin_timeout_error_from_an_idle_fetch`)
+that fails against the old `except nats.errors.TimeoutError` clause
+and passes against the fixed `except TimeoutError` one. Catching the
+builtin is a strict superset: `nats.errors.TimeoutError` instances are
+still caught too, since that class subclasses the builtin.
+
+**Why this escaped Phase 5's own test suite**: every existing
+automated test that exercised `sub.fetch()` either always had a
+message ready (the real-NATS integration tests always publish before
+fetching) or used a `_FakeProcessor`-driven scenario with controlled
+outcomes - none of them let the real consumer idle-poll a genuinely
+empty real stream for its full timeout window the way a long-running
+process naturally does. This is now covered.
+
+**Rules out:** treating this as an acceptable restart-and-move-on
+cost (a crashed consumer silently stops consuming until someone
+notices and restarts it - exactly the kind of failure this project's
+whole messaging-reliability design (Phase 4/5) exists to avoid);
+catching a bare `except Exception` around the fetch call instead
+(would also swallow genuine connection/protocol errors that
+`ConnectionClosedError` handling right below it is specifically
+meant to surface, not hide).
+
+## 28. Mobile sidebar: explicit fixed-position insets + a backdrop + auto-close-on-navigate, not just a negative margin (Phase 6, found in manual browser verification)
+
+**Decision:** Rewrote the `<768px` sidebar CSS to give the fixed-
+position `.app-sidebar` explicit `top`/`left`/`bottom` (not just a
+negative `margin-left`), added a dedicated backdrop element
+(`.app-sidebar-backdrop`, hidden by default via an explicit base-level
+`display: none` so it never renders as a stray empty `<button>` on
+desktop) that closes the menu on click, and made the sidebar close
+itself automatically on navigation (`Sidebar`'s own link `onClick`,
+plus a `Shell`-level `useEffect` keyed on the route as a backstop for
+any non-click navigation). Also removed the Vite React template's
+leftover default `src/index.css` content (a centered, fixed-width
+`#root` with large marketing-page heading styles) - it was never
+appropriate for this app and was fighting `styles/app.css`'s real
+layout.
+
+**Why:** Found in this phase's manual browser verification at ~390px:
+the sidebar stayed open and full-width, squeezing the main content.
+A fixed-position element's `top`/`left`/`right`/`bottom` default to
+`auto`, which resolves to the element's *static* (in-flow) position
+when unset - an ambiguity across browsers/layout contexts that a
+negative-margin-only approach depends on resolving "correctly" by
+accident rather than by being pinned explicitly. Explicit insets
+remove that ambiguity entirely. Separately, the leftover scaffold
+`index.css` constrained `#root`'s width/centering in a way no part of
+`styles/app.css` was written to coexist with - real residue from never
+having cleaned up the starter template, not a design decision.
+
+**Rules out:** relying on `margin-left` alone to hide/show the sidebar
+(the mechanism that didn't reliably work); leaving the sidebar open
+after navigating to a new page on mobile (a real usability trap - the
+menu would visually appear "stuck open" exactly as reported); leaving
+the scaffold's `index.css` in place "because it's mostly harmless" -
+unused leftover template styling actively competing with real layout
+rules is exactly the kind of residue that causes this class of bug and
+should be deleted, not tolerated.
+
+**Not independently re-verified by a human in Chrome this round** (no
+browser tool was available in this session either) - `Shell.test.tsx`
+covers the *behavioral* contract (class toggling, backdrop click,
+auto-close on navigate) that the CSS depends on, since jsdom does not
+evaluate `@media` queries or compute real layout. The actual rendered
+result at <768px still needs your eyes to confirm - see the report's
+"requires user manual re-verification" section.
+
+## 29. Activity shows issueKey (resolved from item_state), never a fabricated title, never a management_db read (Phase 6, found in manual browser verification)
+
+**Decision:** `item_state` (projections/state.py) now also captures
+`issueKey` from `workitem.created`'s own payload (the only event that
+ever names it - docs/EVENT_CATALOG.md). `ActivityResponder` bulk-
+resolves `issueKey` for every WorkItem-aggregate entry from that same
+projection and includes it in its reply; `admin-ui`'s `ActivityPanel`
+renders it in place of the raw aggregate id when present, falling back
+to `{aggregateType} {aggregateId}` otherwise (non-WorkItem aggregates,
+or a WorkItem whose `created` event hasn't been processed yet).
+
+**Why:** Found in manual verification: Activity showed raw internal
+ids, e.g. "moved WorkItem 6ac5...". The brief asked for issue key
+*and title* where practical, but explicitly "using only existing
+event/projection data" and never cross-reading `management_db`. This
+project's events deliberately never carry free-text field content
+(title/description/acceptanceNotes) - see
+`docs/ARCHITECTURE.md` "Events are facts... without exposing
+secrets" and the `workitem.updated` payload note in
+`docs/EVENT_CATALOG.md` ("free-text fields... never their content").
+That is a prior, deliberate design decision this phase must not
+quietly violate just to make one screen's labels nicer. issueKey *is*
+real event data (present in `workitem.created`'s payload) and is the
+one durable, stable, human-meaningful identifier every event's
+aggregate actually has - so it is the correct, policy-compliant
+answer to "make this readable using only existing event/projection
+data," and title is not currently achievable without a rule change
+this phase was not asked to make.
+
+**Rules out:** reading `management_db.work_items` (or any management_db
+collection) from the Python service or the admin UI to fetch a title -
+a direct violation of service ownership (docs/ARCHITECTURE.md "Trust
+boundary") and of this specific instruction; inventing/guessing a
+title from other fields; adding `title` to future event payloads as a
+workaround (a real, considered change to the event contract that
+would need its own review - e.g. whether a title ever changes
+sensitively - not a Phase 6 UI-label fix to make unilaterally).
+
+## 30. Pre-existing item_state documents needed an explicit, narrow backfill - decision #29's fix alone did not retroactively repair them (Phase 6, found in the user's own re-verification)
+
+**Decision:** Decision #29's capture of `issueKey` into `item_state`
+only runs inside `apply_event`'s version-gated write path - it affects
+newly-processed `workitem.created` events, not documents that were
+already projected (by the pre-#29 code) before that fix existed, since
+a redelivery of the same-or-lower-version `created` event is correctly
+treated as STALE and triggers no write at all (see projections/
+state.py's module docstring on why staleness must be a read-first
+decision). Confirmed by direct inspection of the real `insights_db`:
+all 3 real WorkItem documents in `item_state` had no `issueKey` field.
+
+Added `activity_insights/backfill.py` (`python -m
+activity_insights.backfill`): a one-off script, never an HTTP endpoint
+(same rule as replay.py), that opens a *new*, separate durable
+consumer on the real `TEAM_EVENTS` stream - filtered to only the
+`tm.v1.workitem.created` subject - reads each event's own real
+`issueKey`, and calls a new `ItemStateRepository.backfill_issue_key`,
+which *only* sets a currently-missing `issueKey` on a document that
+already exists; it never creates a document, never overwrites one
+that already has a value, and never touches any other field. It never
+touches management_db, never touches the assignment-mandated
+`activity-insights-v1` consumer, and deletes its own throwaway
+consumer once caught up. Run once against the real data: saw 16
+`workitem.created` events, updated the 3 real WorkItem documents that
+were missing `issueKey`; verified afterwards via a direct
+`tm.query.v1.project_activity` request and via the real `GET /api/
+projects/:id/activity` endpoint that `issueKey` is now present on
+every WorkItem entry.
+
+**Why:** The user's own re-verification in Chrome still showed raw
+WorkItem ids after #29 shipped - #29 was necessary but not sufficient,
+because it only changes behavior for events processed *after* the
+code change, not data already sitting in the live projection. The user
+explicitly anticipated this ("If old activity rows need rebuilding,
+replay/rebuild the activity projection safely from TEAM_EVENTS") and
+required it be done without fabricating any value and without mutating
+management_db.
+
+**Rules out:** relying on redelivery/replay of the live
+`activity-insights-v1` consumer to self-heal this (it won't - the
+version gate makes already-recorded events permanently STALE relative
+to current state, by design, and redelivery of already-acked messages
+isn't guaranteed or desirable to trigger anyway); a full
+replay-into-namespaced-collections-then-promote approach (replay.py's
+existing pattern) - rejected as unnecessarily broad and riskier than a
+narrow, field-scoped, idempotent backfill, since it would require
+copying/overwriting whole live collections rather than touching only
+the one missing field; widening `backfill_issue_key` to overwrite an
+existing issueKey - never needed (issueKey is immutable per item) and
+would make the tool capable of corrupting already-correct state on a
+bad future run.

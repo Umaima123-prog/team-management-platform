@@ -74,6 +74,25 @@ class ActivityProjectionRepository:
         doc = await self._collection.find_one({"projectId": project_id}, {"_id": 1})
         return doc is not None
 
+    async def recent_for_project(self, project_id: str, limit: int) -> list[dict[str, Any]]:
+        """Most-recent-first timeline entries for the Phase 6 admin UI's
+        Activity screen (messaging/activity_responder.py) - a thin,
+        read-only projection of the same `activity_projection`
+        documents `record()` writes, never a different data source."""
+        cursor = self._collection.find(
+            {"projectId": project_id},
+            {
+                "_id": 1,
+                "eventType": 1,
+                "aggregateType": 1,
+                "aggregateId": 1,
+                "actorId": 1,
+                "occurredAt": 1,
+            },
+            sort=[("occurredAt", -1)],
+        ).limit(limit)
+        return [doc async for doc in cursor]
+
     async def workspace_for_project(self, project_id: str) -> str | None:
         doc = await self._collection.find_one(
             {"projectId": project_id}, {"workspaceId": 1}, sort=[("occurredAt", -1)]

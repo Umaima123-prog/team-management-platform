@@ -3,7 +3,7 @@
 ## Implementation status (read this first)
 
 This document describes the **target architecture** for the Team
-Management Platform. As of Phase 5, the following exist:
+Management Platform. As of Phase 6, the following exist:
 
 - **Messaging reliability** (Phase 4): the transactional outbox
   (`outbox_events` collection in `management_db`, written inside the
@@ -32,6 +32,12 @@ Management Platform. As of Phase 5, the following exist:
   projections" below for the real (not target) shape, and the Phase 5
   section of `docs/TIMELOG.md` for the automated-test and live-run
   evidence.
+- **Admin UI** (Phase 6, `admin-ui/`): a React + TypeScript app
+  talking only to the real Management Service REST API - dashboard,
+  teams, projects, a Kanban board, a work-item drawer, the real
+  activity timeline, and real insights. See "Admin UI" below for the
+  full design, and the Phase 6 section of `docs/TIMELOG.md` for
+  automated-test and live-verification evidence.
 
 - Repository/service skeletons (NestJS management-service, Python
   activity-insights-service) with no business logic.
@@ -90,10 +96,11 @@ durable, versioned, correlation-tracked facts on the real local
 JetStream server - see "Transactional outbox" / "JetStream" / "Outbox
 publisher relay" below - **and** those facts are now actually consumed
 and projected into `insights_db` by the Python service - see "Python
-inbox and projections" below. What remains not implemented: **the
-AdminLTE UI** (Phase 6). Each later phase that implements a piece of
-this design must update this file so it keeps describing the current
-implementation, not just the plan.
+inbox and projections" below - **and** an admin UI now exists to drive
+all of this through the real API - see "Admin UI" below. What remains
+not implemented: Phase 7 (not started). Each later phase that
+implements a piece of this design must update this file so it keeps
+describing the current implementation, not just the plan.
 
 ## Service ownership
 
@@ -621,3 +628,86 @@ and starts the in-process outbox publisher relay
 (`OutboxRelayService`) on a timer (`OUTBOX_RELAY_INTERVAL_MS`, default
 1s). None of this blocks app boot or `GET /health` if NATS happens to
 be unreachable - see "Health model" above.
+
+## Admin UI (implemented, Phase 6)
+
+`admin-ui/` is a React + TypeScript app (Vite, Vitest + React Testing
+Library) that talks exclusively to the Management Service's real REST
+API (`src/api/`) - it never connects to NATS, never reads
+`insights_db`, and never bypasses `src/common/context/request-context.guard.ts`'s
+`X-Dev-User-Id` trust mechanism (there being no real authentication to
+replace it with - docs/DECISIONS.md #24).
+
+- **Sign-in gate** (`src/components/common/SignInGate.tsx`,
+  `src/context/CurrentUserContext.tsx`): since there is no anonymous
+  `GET /api/users` to bootstrap from, the operator enters one known
+  user id once; afterward every other workspace user is listed and
+  selectable from the topbar. `status` is a three-state machine
+  (`checking`/`signed-out`/`signed-in`), not a boolean - a stored id
+  from a previous visit is only a candidate until the server actually
+  confirms it, so a stale id can never flash protected content before
+  being rejected (a real bug found and fixed this phase - see
+  docs/TIMELOG.md).
+- **Dashboard**: team/active-project/open-item/overdue-item counts and
+  a projection-freshness indicator, computed from the real `GET
+  /api/teams`, `GET /api/projects`, `GET /api/projects/:id/board`,
+  `GET /api/projects/:id/items`, and `GET /api/projects/:id/insights`
+  - there is no cross-project aggregate endpoint, so this is bounded
+  N+1 fan-out (`MAX_PROJECTS_SCANNED`), honestly labeled when
+  truncated, not hidden.
+- **Teams / Projects**: create, list, and (for teams) member/role
+  management, all via the real endpoints, with the server's own
+  validation error messages surfaced verbatim (never swallowed, never
+  replaced with a generic message that would hide what's actually
+  wrong).
+- **Kanban board** (`src/pages/board/`): columns and cards are never a
+  frontend-only arrangement. `useBoardItems.ts`'s `moveItem` is the one
+  place any card's position changes: it applies the move optimistically
+  (immediate drag/drop feedback), sends `expectedVersion` plus
+  `targetColumnId`/`beforeItemId`/`afterItemId` to the real
+  `POST /api/items/:itemId/move`, and only keeps the optimistic
+  position after the server confirms it - a non-conflict failure rolls
+  back to the pre-move snapshot, and a 409 refreshes the entire
+  board+items from the server and shows a specific "this item changed
+  since you loaded it" message, never a generic error (docs/DECISIONS.md
+  #25). Every card also exposes non-drag controls (up/down reorder
+  buttons, a "Move to…" column select) so dragging is never required.
+  A column's WIP badge turns a warning color once its item count
+  exceeds `wipLimit` - the data model already carries this field
+  (Phase 3), even though no column-management API exists yet to set it
+  to anything but `null`.
+- **Work-item drawer** (`src/pages/ItemDrawer.tsx`): shows/edits issue
+  key, type, title, description, assignee, reporter (read-only - no
+  API supports changing it), priority, labels, due date, and version.
+  The assignee `<select>` only ever offers the project's owning team's
+  active members - the same rule `WorkItemsService.assertAssigneeEligible`
+  enforces server-side; the UI restriction narrows *in addition to*
+  that check, it does not replace it, and a test
+  (`ItemDrawer.test.tsx`) proves the server's 400 still fires even if
+  the UI's own restriction were somehow bypassed.
+- **Activity** (`src/pages/ActivityPanel.tsx`): renders the real
+  `GET /api/projects/:projectId/activity` response (actor, action,
+  affected item, time, newest-first) - see "Python inbox and
+  projections" and docs/DECISIONS.md #22 for where that data actually
+  comes from. `not_ready`/`pending`/`unavailable` are rendered as
+  distinct, clearly-worded states, never as an empty list
+  indistinguishable from "no activity yet."
+- **Insights** (`src/pages/InsightsPanel.tsx`): renders the real
+  `GET /api/projects/:projectId/insights` response - workload by
+  assignee, counts by column/status, workload by priority, and a
+  Ready/Stale badge derived from how old `generatedAt` is. Never
+  fakes instant consistency: `not_ready`/`pending`/`unavailable` each
+  get their own explicit, differently-worded state.
+- **Accessibility/safety**: every form field has a real
+  `<label htmlFor>` (not placeholder-only text); the item drawer is an
+  `aria-modal` dialog that moves focus to its close button on open and
+  closes on Escape; every drag-and-drop move has a keyboard-operable
+  equivalent; user-authored content (titles, descriptions, labels) is
+  only ever rendered as text content - this app contains no
+  `dangerouslySetInnerHTML` call anywhere.
+- **CORS**: the Management Service now calls `app.enableCors()`
+  (`src/main.ts`) scoped to an explicit, configurable origin
+  allow-list (`ADMIN_UI_ORIGIN`, default `http://localhost:5173`) -
+  never a wildcard. No credentials/cookies are involved (the trust
+  mechanism is a header, not a cookie), so this does not widen who can
+  act as a given user - see docs/DECISIONS.md #26.

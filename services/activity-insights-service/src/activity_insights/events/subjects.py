@@ -49,6 +49,12 @@ ACTIVITY_INSIGHTS_DURABLE_CONSUMER = "activity-insights-v1"
 
 PROJECT_INSIGHTS_QUERY_SUBJECT = "tm.query.v1.project_insights"
 
+# Phase 6 admin UI's Activity screen - mirrors
+# PROJECT_INSIGHTS_QUERY_SUBJECT exactly (see
+# management-service's subjects.ts PROJECT_ACTIVITY_QUERY_SUBJECT,
+# which must match this string exactly).
+PROJECT_ACTIVITY_QUERY_SUBJECT = "tm.query.v1.project_activity"
+
 
 def subject_for_event_type(event_type: str) -> str:
     return f"{SUBJECT_PREFIX}{event_type}"

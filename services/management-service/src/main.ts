@@ -15,6 +15,25 @@ async function bootstrap() {
   // once, only on real shutdown" actually true (see docs/DECISIONS.md #16).
   app.enableShutdownHooks();
 
+  // Phase 6: the admin UI is a separate origin (its own dev server /
+  // static host), so it needs CORS - never enabled before Phase 6
+  // because nothing but same-origin tooling (curl, supertest, Postman)
+  // called this API. Scoped to an explicit, configurable allow-list
+  // (never a wildcard) - no credentials/cookies are used (the trust
+  // mechanism is a header, not a cookie), so this does not widen the
+  // existing X-Dev-User-Id trust model (docs/ARCHITECTURE.md "Request
+  // context / trust model") to any origin that can merely draw a
+  // <script> tag.
+  const adminUiOrigins = (process.env.ADMIN_UI_ORIGIN ?? 'http://localhost:5173')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+  app.enableCors({
+    origin: adminUiOrigins,
+    methods: ['GET', 'POST', 'PATCH', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'X-Dev-User-Id', 'X-Correlation-Id'],
+  });
+
   // Explicit, documented request-body cap (abuse-control baseline,
   // see docs/DECISIONS.md) - well above any legitimate payload this
   // API accepts (the largest validated text field is 10,000 chars),

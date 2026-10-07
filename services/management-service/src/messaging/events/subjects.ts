@@ -50,3 +50,11 @@ export const ACTIVITY_INSIGHTS_DURABLE_CONSUMER = 'activity-insights-v1';
  * project insight queries - see docs/ARCHITECTURE.md "Core NATS vs
  * JetStream". */
 export const PROJECT_INSIGHTS_QUERY_SUBJECT = 'tm.query.v1.project_insights';
+
+/** Core NATS request/reply subject for a project's recent activity
+ * timeline (Phase 6: the admin UI's Activity screen). Added following
+ * the exact same pattern as PROJECT_INSIGHTS_QUERY_SUBJECT above -
+ * same bounded-timeout/typed-fallback contract, same "Python answers,
+ * NestJS proxies" shape (docs/ARCHITECTURE.md "Core NATS request/
+ * reply") - rather than inventing a different integration style. */
+export const PROJECT_ACTIVITY_QUERY_SUBJECT = 'tm.query.v1.project_activity';

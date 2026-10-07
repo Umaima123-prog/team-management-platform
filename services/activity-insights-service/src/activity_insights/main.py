@@ -1,6 +1,6 @@
 """Service entrypoint.
 
-Runs three concurrent pieces in one process/event loop:
+Runs four concurrent pieces in one process/event loop:
 1. The liveness/readiness/consumer-state HTTP app (health_app.py), via
    uvicorn's asyncio server API (not its own blocking `uvicorn.run`,
    so it can share the loop with the pieces below).
@@ -8,6 +8,8 @@ Runs three concurrent pieces in one process/event loop:
    projecting events into insights_db.
 3. The Core NATS request/reply insights responder
    (messaging/responder.py).
+4. The Core NATS request/reply activity responder
+   (messaging/activity_responder.py, Phase 6).
 
 Any one of these failing to start (e.g. NATS unreachable) logs and lets
 the others continue - consistent with this project's existing
@@ -30,11 +32,13 @@ from .db import database_from_client, get_client
 from .health_app import app, consumer_state_view
 from .index_bootstrap import bootstrap_indexes
 from .logging_config import configure_logging
+from .messaging.activity_responder import ActivityResponder
 from .messaging.consumer import EventConsumer
 from .messaging.processor import EventProcessor
 from .messaging.responder import InsightsResponder
 from .nats_client import connect
 from .projections.activity import ActivityProjectionRepository
+from .projections.state import ItemStateRepository
 from .projections.workload import WorkloadProjectionRepository
 
 logger = logging.getLogger(__name__)
@@ -96,6 +100,15 @@ async def run() -> None:
             consumer_name=settings.nats_durable_consumer_name,
         )
         await responder.start()
+
+        activity_responder = ActivityResponder(
+            nc,
+            ActivityProjectionRepository(db),
+            ConsumerStateRepository(db),
+            ItemStateRepository(db),
+            consumer_name=settings.nats_durable_consumer_name,
+        )
+        await activity_responder.start()
 
     await asyncio.gather(*tasks)
 

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
@@ -110,3 +111,37 @@ async def test_redelivery_exhausted_records_failure_and_acks_instead_of_looping_
     processor.record_redelivery_exhausted.assert_awaited_once()
     msg.ack.assert_awaited_once()
     msg.nak.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_forever_survives_a_raw_builtin_timeout_error_from_an_idle_fetch() -> None:
+    """Regression test for a real crash found live in Phase 6's manual
+    verification: nats-py's internal fetch loop sometimes raises the
+    bare builtin TimeoutError directly (not always the
+    nats.errors.TimeoutError subclass) when a fetch genuinely finds no
+    messages. The old `except nats.errors.TimeoutError` clause let that
+    escape uncaught, which propagated through asyncio.gather() in
+    main.py and killed the entire process - see
+    docs/DECISIONS.md #27."""
+    processor = AsyncMock()
+    stop_event = asyncio.Event()
+    call_count = 0
+
+    async def fetch(*_args: object, **_kwargs: object) -> list[object]:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:
+            stop_event.set()
+        raise TimeoutError("no messages available")  # the raw builtin, not a nats.errors subclass
+
+    sub = MagicMock()
+    sub.fetch = fetch
+    js = MagicMock()
+    js.pull_subscribe_bind = AsyncMock(return_value=sub)
+
+    consumer = EventConsumer(js=js, processor=processor, state_view=ConsumerStateView("test"))
+
+    await consumer.run_forever(stop_event)  # must return normally - never raise
+
+    assert call_count >= 2
+    processor.process.assert_not_called()

@@ -37,6 +37,8 @@ def _matches(doc: dict[str, Any], filt: dict[str, Any]) -> bool:
                     return False
                 if op == "$ne" and actual == operand:
                     return False
+                if op == "$in" and actual not in operand:
+                    return False
         else:
             if actual != expected:
                 return False
@@ -57,6 +59,10 @@ def _equality_seed(filt: dict[str, Any]) -> dict[str, Any]:
 class FakeCursor:
     def __init__(self, docs: list[dict[str, Any]]) -> None:
         self._docs = docs
+
+    def limit(self, n: int) -> FakeCursor:
+        self._docs = self._docs[:n]
+        return self
 
     def __aiter__(self) -> FakeCursor:
         self._iter = iter(self._docs)
@@ -120,10 +126,15 @@ class FakeCollection:
         self,
         filt: dict[str, Any] | None = None,
         projection: dict[str, Any] | None = None,
+        sort: list[tuple[str, int]] | None = None,
         session: Any = None,
     ) -> FakeCursor:
         filt = filt or {}
-        matches = [_project(d, projection) for d in self._docs.values() if _matches(d, filt)]
+        docs = [d for d in self._docs.values() if _matches(d, filt)]
+        if sort:
+            for field, direction in reversed(sort):
+                docs.sort(key=lambda d: d.get(field), reverse=(direction < 0))
+        matches = [_project(d, projection) for d in docs]
         return FakeCursor(matches)
 
     async def insert_one(self, doc: dict[str, Any], session: Any = None) -> None:
