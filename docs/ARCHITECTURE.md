@@ -3,7 +3,7 @@
 ## Implementation status (read this first)
 
 This document describes the **target architecture** for the Team
-Management Platform. As of Phase 4, the following exist:
+Management Platform. As of Phase 5, the following exist:
 
 - **Messaging reliability** (Phase 4): the transactional outbox
   (`outbox_events` collection in `management_db`, written inside the
@@ -19,11 +19,19 @@ Management Platform. As of Phase 4, the following exist:
   outbox", "JetStream", "Outbox publisher relay", and "Core NATS
   request/reply" below for the real (not target) shape of each, and
   `docs/EVENT_CATALOG.md` for the exact subjects now emitted by which
-  Phase 3 commands. **Not implemented in Phase 4**: the Python
-  consumer that actually processes delivered events into projections
-  (Phase 5) - the durable consumer `activity-insights-v1` is
-  provisioned and verified reachable, but nothing yet acknowledges a
-  delivered message.
+  Phase 3 commands.
+- **Event consumption and projections** (Phase 5): the Python
+  Activity & Insights Service now binds to the `activity-insights-v1`
+  durable consumer and actually processes delivered events - inbox
+  deduplication, version-gated `item_state` tracking, the
+  `activity_projection` and `workload_projection` collections, bounded
+  retry for transient Mongo failures, a poison path
+  (`processing_failures`) for malformed/unsupported events, a real
+  `tm.query.v1.project_insights` Core NATS responder, consumer-state
+  health reporting, and a replay script. See "Python inbox and
+  projections" below for the real (not target) shape, and the Phase 5
+  section of `docs/TIMELOG.md` for the automated-test and live-run
+  evidence.
 
 - Repository/service skeletons (NestJS management-service, Python
   activity-insights-service) with no business logic.
@@ -77,16 +85,15 @@ Management Platform. As of Phase 4, the following exist:
   workspace + a few users.
 - This documentation set.
 
-As of Phase 4, domain writes land in `management_db` **and** produce
+As of Phase 5, domain writes land in `management_db` **and** produce
 durable, versioned, correlation-tracked facts on the real local
 JetStream server - see "Transactional outbox" / "JetStream" / "Outbox
-publisher relay" below. What remains not implemented: **Python-side
-event consumption/projection logic** (the `activity_projection`/
-`workload_projection`/`processing_failures` collections and the
-consumer loop that would populate them - Phase 5), and **the AdminLTE
-UI**. Each later phase that implements a piece of this design must
-update this file so it keeps describing the current implementation,
-not just the plan.
+publisher relay" below - **and** those facts are now actually consumed
+and projected into `insights_db` by the Python service - see "Python
+inbox and projections" below. What remains not implemented: **the
+AdminLTE UI** (Phase 6). Each later phase that implements a piece of
+this design must update this file so it keeps describing the current
+implementation, not just the plan.
 
 ## Service ownership
 
@@ -225,10 +232,11 @@ pagination on `_id`, not offset/skip - see `docs/API.md`.
    rows, publishes each to the `TEAM_EVENTS` JetStream stream with
    `Nats-Msg-Id` set to the event's `eventId`, waits for a real publish
    acknowledgement, and only then marks the row published.
-5. (Phase 5) The Python service's durable JetStream consumer
-   (`activity-insights-v1`, provisioned in Phase 4) will receive the
-   event, persist an inbox record keyed by `eventId`, apply the
-   projection update, and only then acknowledge the message.
+5. The Python service's durable JetStream consumer
+   (`activity-insights-v1`, provisioned in Phase 4, consumed from
+   Phase 5) receives the event, persists an inbox record keyed by
+   `(eventId, consumer)`, applies the projection update, and only then
+   acknowledges the message - see "Python inbox and projections".
 
 Steps 4-5 are asynchronous relative to step 3: callers see transactional
 consistency for their own write, and everyone else sees the effect of
@@ -291,28 +299,101 @@ bootstrap is idempotent (`StreamBootstrapService`, verified against a
 real local server in `test/nats-integration.e2e-spec.ts`): it never
 silently replaces a structurally different existing stream.
 
-## Python inbox and projections (target design - Phase 5)
+## Python inbox and projections (implemented, Phase 5)
 
 Because JetStream delivery is at-least-once, the same event can arrive
 more than once (consumer crash-and-redeliver, network retry, etc.). The
-Python service never trusts "I haven't seen this" from memory - instead:
+Python service (`services/activity-insights-service/src/activity_insights/`)
+never trusts "I haven't seen this" from memory - instead:
 
-1. On receiving an event, it checks the `inbox` collection for that
-   `event_id`.
-2. If already present, it skips re-applying the projection and simply
-   acknowledges (idempotent no-op).
-3. If not present, it applies the projection update and the inbox
-   record **in the same local transaction/step** that precedes the
-   JetStream ack.
-4. The event is acknowledged to JetStream **only after** both the
-   projection write and the inbox write succeed. If either fails, the
-   message is not acked and JetStream will redeliver it.
-5. If projection logic itself fails repeatedly (bad data, bug), the
-   event is recorded in `processing_failures` for investigation rather
-   than acked-and-dropped or retried forever inline.
+1. On receiving an event (`messaging/consumer.py`'s `EventConsumer`,
+   bound - never created - to the `activity-insights-v1` durable pull
+   consumer on `TEAM_EVENTS`), the envelope is parsed and validated
+   (`events/envelope.py`). A structurally invalid envelope, an
+   unsupported `schemaVersion`, or an unrecognized `eventType` is
+   non-retryable: it is recorded in `processing_failures` and acked
+   immediately - retrying a malformed event can never succeed.
+2. `inbox.repository.InboxRepository` checks for an existing
+   `(event_id, consumer)` pair. If already present, the event is a
+   duplicate - the projection is not reapplied, and the message is
+   simply acked (idempotent no-op).
+3. If not present, `messaging/processor.py`'s `EventProcessor` applies
+   the projection update, the activity-log entry, the inbox record,
+   and the consumer-state record **in one real MongoDB session
+   transaction** (`AsyncIOMotorClientSession.with_transaction`) -
+   all-or-nothing, the same guarantee `DatabaseService.withTransaction`
+   gives the Management Service.
+4. The event is acknowledged to JetStream **only after** that
+   transaction commits. If it fails with a transient Mongo error
+   (`messaging/errors.py` classifies this), the message is not acked;
+   a few immediate in-process retries are attempted, then the broker
+   redelivers (bounded by the consumer's own `max_deliver`). Once that
+   bound is reached, the event is recorded in `processing_failures`
+   (reason `REDELIVERY_EXHAUSTED`) and acked - never redelivered
+   forever.
+5. **Out-of-order/older events never overwrite newer projected
+   state**: `projections/state.py`'s `ItemStateRepository` keeps one
+   version-gated document per work-item aggregate (`item_state`,
+   internal). It reads the current document first and only issues a
+   write if the incoming `aggregate.version` is strictly greater -
+   deliberately a read-then-decide, never a write-and-react-to-a-
+   conflict-error: because this all runs inside one multi-document
+   transaction, triggering a server-side error from an operation
+   *inside* that transaction (even one caught in application code)
+   marks the whole transaction unusable, and the automatic transaction
+   retry this failure mode triggers re-executes the identical
+   deterministic error forever until it gives up - a real, reproduced
+   hang during this phase's live run (see `docs/DECISIONS.md` #20). A
+   stale/redelivered older-version event is detected and reported
+   `STALE` before any write is attempted - the event is still
+   inbox-recorded and acked, just applies no projection change.
+6. `projections/workload.py`'s `WorkloadProjectionRepository` derives
+   `workload_projection` counters (by project, column/status,
+   priority, and assignee) from the actual before/after snapshot
+   `item_state` returns for each transition - never from an event's
+   own claimed "previous" value. This is what makes a reassignment's
+   decrement-old/increment-new, a move's column delta, and an
+   archive's removal from every active bucket all correct exactly
+   once under at-least-once redelivery: the inbox (duplicate) and the
+   version gate (stale) are what prevent the delta from ever being
+   double-applied: the `$inc` itself is not idempotent, the gating
+   around it is.
+7. `projections/activity.py`'s `ActivityProjectionRepository` records
+   an append-only timeline entry for every known event type (not just
+   work-item ones - team/project/board events are activity-worthy
+   too), indexed by `(projectId, occurredAt)`.
 
-This combination (dedupe-by-inbox + ack-after-persist) is what makes
-the consumer idempotent under at-least-once delivery.
+This combination (dedupe-by-inbox + version-gated state + ack-after-
+commit) is what makes the consumer idempotent under at-least-once,
+possibly-reordered delivery - see
+`services/activity-insights-service/tests/test_processor.py` for the
+automated evidence (valid/duplicate/out-of-order/malformed/
+unsupported-version/transient-error/reassignment/move/archive cases)
+and `docs/TIMELOG.md`'s Phase 5 notes for the real-NATS and real-Atlas
+live evidence.
+
+### Replay into a clean projection
+
+`python -m activity_insights.replay --namespace <prefix>` (never an
+HTTP endpoint - "no unsafe public replay/admin endpoints" is a named
+requirement) creates a brand-new, separate durable consumer on the
+real `TEAM_EVENTS` stream with `deliver_policy=all` and runs every
+message through the exact same `EventProcessor`/`EventConsumer` logic
+the live service uses, but with every collection name prefixed by
+`--namespace` - so a replay run writes to e.g. `replay1_item_state`,
+never the live `item_state`, and never touches `management_db` at all
+(this service holds no credentials for it). See
+`src/activity_insights/replay.py`.
+
+### Consumer-state health reporting
+
+`GET /health/consumer` (additive - `/healthz` and `/readyz` are
+unchanged Phase 2 contracts) reports the assignment's required
+diagnostic fields: `durableConsumerName`, `connected`,
+`lastProcessedStreamSeq`, `lastSuccessfulProcessingAt`, and
+`processingAgeSeconds` (freshness). Like the NestJS `messaging` health
+block (`docs/DECISIONS.md` #13), this is a diagnostic and never flips
+an HTTP status of its own.
 
 ## Core NATS request/reply
 
@@ -341,9 +422,17 @@ by `INSIGHTS_QUERY_TIMEOUT_MS` (default 2s); verified against both a
 real stub responder and genuine no-responder/timeout conditions on a
 real local NATS server (`test/nats-integration.e2e-spec.ts`).
 
-**Not yet implemented**: the actual Python responder (Phase 5) - Phase
-4's tests use a stub responder, never claimed as the real Python
-service.
+**Implemented (Phase 5, Python side)**: `messaging/responder.py`'s
+`InsightsResponder` subscribes to `tm.query.v1.project_insights` and
+always replies - `{"status": "ok", "data": {...}}` once this service
+has ever seen an event for that `projectId` (workload grouped by
+assignee/column/priority from `workload_projection`, plus
+`lastProcessedSequence` from consumer-state), or a typed `not_ready`
+(`NO_DATA_YET_FOR_PROJECT`, `WORKSPACE_MISMATCH`, `MALFORMED_REQUEST`,
+or `INTERNAL_ERROR`) otherwise - never silence (an unhandled error
+replies `not_ready`/`INTERNAL_ERROR` rather than leaving the NestJS
+caller to time out). Phase 4's tests used a stub responder; this is
+the real one.
 
 ## Optimistic concurrency and HTTP 409
 
@@ -388,7 +477,9 @@ client (`src/messaging/logging/messaging-log.ts`) always include
 `service`, `correlationId`, `eventId`, `aggregateId`, `subject`,
 `attempt`, `latencyMs`, and `result` - the assignment's named
 traceability field set - end to end from HTTP command through outbox
-row through publish through (future, Phase 5) consumer log.
+row through publish through to the Python consumer's own structured
+log line (`stream_seq`, `eventId`, `eventType`, `result` -
+`messaging/consumer.py`'s `handle_message`, Phase 5).
 
 ## Health model (Phase 4)
 
@@ -408,8 +499,10 @@ row through publish through (future, Phase 5) consumer log.
   against Atlas, fixed, and the fix itself since confirmed by a clean
   live re-run (13/13 checks, `docs/TIMELOG.md` Phase 4c); see
   `docs/DECISIONS.md` #16 for the root cause.
-- The Python service's own health/readiness/consumer-lag reporting is
-  Phase 5 scope - not implemented yet.
+- The Python service's own health/readiness/consumer-lag reporting
+  (Phase 5): `GET /healthz`/`GET /readyz` (Phase 2, unchanged) plus the
+  new `GET /health/consumer` diagnostic - see "Consumer-state health
+  reporting" above.
 
 ## Security baseline (Phase 3)
 

@@ -11,11 +11,11 @@ onboarding assignment PDF, section 8) - this file was updated to match
 that exactly, superseding an earlier draft written before the full
 assignment detail was available.
 
-**Not yet implemented**: the Python consumer that actually processes
-these events into `activity_projection`/`workload_projection`
-(Phase 5). Phase 4 only provisions the durable consumer configuration
-(`activity-insights-v1`) - nothing currently acknowledges or acts on
-delivered messages.
+**Phase 5 update**: the Python consumer that processes these events
+into `activity_projection`/`workload_projection`/`item_state`/`inbox`/
+`consumer_state` is implemented and live-tested against the real local
+NATS server - see `docs/ARCHITECTURE.md` "Python inbox and
+projections" and `docs/TIMELOG.md`'s Phase 5 notes.
 
 ## Subject naming convention
 
@@ -141,15 +141,41 @@ of the stored message.
 |---|---|
 | Durable name | `activity-insights-v1` (assignment-mandated) |
 | Type | Pull consumer (matches the assignment's "Durable pull consumer" topology row) |
-| Ack policy | Explicit - a message is only acked after (future, Phase 5) inbox + projection writes succeed |
+| Ack policy | Explicit - a message is only acked after inbox + projection writes succeed (Phase 5, real) |
 | Deliver policy | All - a fresh/rebuilt consumer replays full retained history, matching "replay into a clean projection" |
-| Max deliveries | 5, with backoff `[1s, 5s, 30s, 2m]` | Bounded redelivery for a transient failure; after 5 attempts NATS stops redelivering and (Phase 5) the Python service is responsible for `processing_failures` |
-| Ack wait | 30s |
+| Max deliveries | 5, with backoff `[1s, 5s, 30s, 2m]` | Bounded redelivery for a transient failure; after 5 attempts NATS stops redelivering and the Python service records it in `processing_failures` (Phase 5, `REDELIVERY_EXHAUSTED`) |
+| Ack wait (configured) | 30s (`nanos(30_000)`, `jetstream.config.ts`) | The value this codebase asks the server for. |
+| Ack wait (effective, server-reported) | **1s** - this is correct, not drift (see below) | |
 
 Provisioned by Phase 4 (`StreamBootstrapService`), verified against a
 real local server (`test/nats-integration.e2e-spec.ts`). The consumer
-loop that actually fetches/processes/acks from it is Phase 5 - nothing
-currently acknowledges a delivered message.
+loop that fetches/processes/acks from it is implemented in Phase 5
+(`services/activity-insights-service/src/activity_insights/messaging/consumer.py`).
+
+**Verified live (Phase 5 final verification) - this is NOT a
+provisioning drift, it's correct NATS JetStream behavior**: an earlier
+pass through this document incorrectly diagnosed the deployed
+consumer's `ack_wait` reporting as 1s (not 30s) as staleness from
+`StreamBootstrapService.ensureDurableConsumer` never reconciling an
+existing consumer's config. That diagnosis was wrong and is corrected
+here. The real mechanism, confirmed by a direct probe against the real
+local NATS server (two throwaway consumers, one with `backoff` set and
+one without, both requesting `ack_wait=10`): **when a `backoff` array
+is configured, the JetStream server always reports (and uses, for the
+first redelivery) `ack_wait = backoff[0]`, regardless of whatever
+`ack_wait` value was explicitly requested.** Without a `backoff` array,
+the requested `ack_wait` is honored exactly. Since this consumer sets
+`backoff: [1s, 5s, 30s, 120s]` (both in `jetstream.config.ts` and in
+this Python service's own throwaway/replay consumers, which mirror the
+same values), **every correctly-provisioned instance of this consumer
+- past, present, or freshly recreated - reports `ack_wait: 1s`**, not
+30s. The `ack_wait: 30s` field in `jetstream.config.ts` is not
+inaccurate as a *request*, but it is overridden by the `backoff`
+array's first element the moment both are set together - the two
+fields are not independent tuning knobs here. This document's earlier
+"30s" row was therefore the actual mismatch; it has been corrected
+above to show both the configured and effective values rather than
+asserting one number that doesn't match observed behavior.
 
 ## Message-handling rules (implemented)
 
@@ -174,4 +200,4 @@ currently acknowledges a delivered message.
 
 | Subject | Caller | Responder | Notes |
 |---|---|---|---|
-| `tm.query.v1.project_insights` | NestJS BFF (`GET /api/projects/:projectId/insights`) | Python service (Phase 5 - stubbed in Phase 4 integration tests) | Core NATS, not JetStream (see `docs/DECISIONS.md` #2). Bounded timeout (`INSIGHTS_QUERY_TIMEOUT_MS`, default 2s), typed `pending`/`unavailable`/`not_ready` fallback - never blocks indefinitely. |
+| `tm.query.v1.project_insights` | NestJS BFF (`GET /api/projects/:projectId/insights`) | Python service (real responder, Phase 5 - stubbed only in Phase 4's own integration tests) | Core NATS, not JetStream (see `docs/DECISIONS.md` #2). Bounded timeout (`INSIGHTS_QUERY_TIMEOUT_MS`, default 2s), typed `pending`/`unavailable`/`not_ready` fallback - never blocks indefinitely. |

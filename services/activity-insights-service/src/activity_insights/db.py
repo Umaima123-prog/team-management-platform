@@ -37,14 +37,33 @@ def get_client(settings: Settings) -> AsyncIOMotorClient:
     )
 
 
-def get_database(settings: Settings) -> AsyncIOMotorDatabase:
+def database_from_client(client: AsyncIOMotorClient, settings: Settings) -> AsyncIOMotorDatabase:
+    """Same insights_db-only guard as get_database(), but reuses a
+    client the caller already has - required whenever a `db[...]`
+    collection and a `client.start_session()` session will be used
+    together (a Mongo session is only valid against the exact client
+    instance that created it; mixing clients raises
+    `InvalidOperation: Can only use session with the MongoClient that
+    started it` - a real bug hit and fixed during Phase 5's first live
+    run, see docs/TIMELOG.md)."""
     if settings.mongodb_db_name != EXPECTED_DB_NAME:
         raise RuntimeError(
             f"Refusing to connect: MONGODB_DB_NAME={settings.mongodb_db_name!r}, "
             f"but this service may only ever use {EXPECTED_DB_NAME!r}."
         )
-    client = get_client(settings)
     return client[settings.mongodb_db_name]
+
+
+def get_database(settings: Settings) -> AsyncIOMotorDatabase:
+    """Convenience for callers that only need a database handle, not a
+    session on the same client (e.g. the FastAPI health app's
+    per-request dependency). Callers that will ALSO start a session
+    against this database (the consumer, the responder, replay.py)
+    must instead call get_client() once and pass that same client to
+    both database_from_client() and client.start_session() - see
+    main.py / replay.py."""
+    client = get_client(settings)
+    return database_from_client(client, settings)
 
 
 def create_insights_db(settings: Settings) -> AsyncIOMotorDatabase:

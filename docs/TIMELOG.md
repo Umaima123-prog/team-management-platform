@@ -15,6 +15,9 @@ phase so slippage is visible early rather than discovered at hour 19.
 | 4a    | outbox_events index registry gap closed (missed in the initial Phase 4 pass); live-verification script + instructions handed off for the user to run outside the sandbox | 2026-10-07 10:03 PST | 2026-10-07 10:20 PST | ~0h 17m | See notes below. |
 | 4b    | Live Mongo connection-lifecycle bug found by the user running the real app outside the sandbox (`MongoTopologyClosedError`), root-caused and fixed | 2026-10-07 10:25 PST | 2026-10-07 10:33 PST | ~0h 08m | See notes below - `docs/DECISIONS.md` #16 has the full root cause. |
 | 4c    | Live Phase 4 verification re-run by the user (post-fix) against real Atlas + real local NATS, outside the sandbox - full pass, evidence recorded | 2026-10-07 10:35 PST | 2026-10-07 10:40 PST | ~0h 05m | 13/13 checks passed. See notes below. |
+| 4d    | Second independent live verification re-run by the user (same setup as 4c), plus a manual cross-check of the PubAck evidence - confirms reproducibility, not a one-off pass | 2026-10-07 (same session, immediately after 4c) | 2026-10-07 | not separately timestamped by the user | 13/13 checks passed again; stream sequence 45 (correctly advanced from 44, as expected for a new publish). **Phase 4 marked VERIFIED END-TO-END.** See notes below. |
+| 5     | Activity & Insights Service (Python): envelope validation, inbox dedup, version-gated item_state, activity/workload projections, bounded retry + poison path, real Core NATS responder, consumer-state health, replay script, tests, docs | 2026-10-07 ~11:10 PST | 2026-10-07 ~12:25 PST | ~1h 15m (approximate - not individually stamped at task start) | Three real bugs found and fixed live against real Atlas + real NATS (shared-MongoClient-session; inbox/processing_failures missing namespace support; a transaction-poisoning upsert-conflict pattern that caused a real multi-minute hang) - see notes below and `docs/DECISIONS.md` #17-20. Full real backlog (45 messages) processed cleanly after fixes - see notes. |
+| 5a    | Final live end-to-end workload verification (real NestJS API + real Atlas + real NATS + real Python consumer, fresh team/project/work items) and an `ack_wait` documentation-vs-deployed-config re-check | 2026-10-07 ~12:30 PST | 2026-10-07 ~12:40 PST | ~0h 10m | Non-zero workload counts confirmed correct and non-duplicated end to end; the earlier "ack_wait drift" note was itself found to be a misdiagnosis and corrected - see notes below and `docs/DECISIONS.md` #21. |
 
 Add a new row per phase - do not overwrite history.
 
@@ -355,3 +358,269 @@ report (item 4, Atlas transaction verification) and from Phase 4b (the
 Mongo lifecycle fix needed to be proven live, not just unit-tested).
 See `docs/DECISIONS.md` #11 and #16 for the updated decision records.
 No code changes this round - documentation only, per instruction.
+
+### Phase 4d notes (second independent live verification: reproducibility confirmed)
+
+The user re-ran `phase4-live-verify.js` a second time, independently of
+the 4c run, against the same real local app and real Atlas. **Result:
+13/13 checks passed again.** The one load-bearing number that must
+differ run-to-run - the JetStream stream sequence of the newly
+published message - correctly advanced from **44** (Phase 4c) to
+**45** (this run), which is itself evidence the earlier result wasn't
+a fluke or a stale/cached read: a durable stream only hands out a new,
+higher sequence number for a genuinely new publish.
+
+The user additionally performed a manual cross-check of the same kind
+the script already does internally (TIMELOG Phase 4c, item 7): the
+verification script's own reported `seq = 45` was compared by hand
+against Terminal A's relay log line for the same publish
+(`"result":"published","streamSeq":45`) - they matched. This is the
+same "two independent observers agree on the same sequence" evidence
+as Phase 4c, now reproduced on a second, independent run.
+
+With two independently clean 13/13 runs against real Atlas and real
+local JetStream, and the Phase 4b Mongo connection-lifecycle fix
+holding across both, **Phase 4 is marked VERIFIED END-TO-END.** No
+code changes this round - documentation only, per instruction. Phase 5
+has not been started.
+
+### Phase 5 notes (Activity & Insights Service: implementation + three real bugs found and fixed live)
+
+Implemented the full Python consumer side: `events/envelope.py`
+(Pydantic envelope parsing distinguishing malformed-schema/
+unsupported-schemaVersion/unknown-eventType as three separately
+classified non-retryable errors), `inbox/repository.py` (dedup by
+`(event_id, consumer)`), `projections/state.py` (version-gated
+`item_state`, `STALE` outcome via a read-then-decide check - see bug
+#3 below for why it is NOT the upsert-conflict approach first tried),
+`projections/workload.py` (counters by
+project/column/priority/assignee, delta derived from `item_state`'s
+own before/after snapshot - see `docs/DECISIONS.md` #17),
+`projections/activity.py` (append-only timeline), `failures/repository.py`
+(poison path), `messaging/processor.py` (per-message orchestration in
+one real Mongo transaction), `messaging/consumer.py` (the durable
+pull-consumer loop, bounded in-process retry + broker-level nak/
+redelivery + exhaustion-to-poison), `messaging/responder.py` (real
+`tm.query.v1.project_insights` Core NATS responder), `consumer_state.py`
+(health/freshness reporting), `replay.py` (namespaced, separate-
+consumer replay script), plus `GET /health/consumer` on the existing
+FastAPI app and a fixed `NATS_DURABLE_CONSUMER_NAME` default
+(`"activity-insights-service"` → `"activity-insights-v1"`, which never
+matched the already-provisioned consumer - a real config bug, not
+previously exercised by anything).
+
+**Automated test suite**: 42 tests (`pytest`) - envelope validation
+(valid/malformed/wrong-typed-field/unsupported-schemaVersion/unknown-
+eventType), processor-level (valid event, duplicate, out-of-order
+version, malformed schema, unsupported schemaVersion, unknown event
+type, transient Mongo error, reassignment delta + idempotency under
+redelivery, movement delta, archived item), consumer-level (ack on
+success/poison, in-process retry then nak, recovery mid-retry,
+redelivery exhaustion → poison → ack), responder-level (ok/not_ready/
+malformed-request/workspace-mismatch), a real-local-NATS integration
+suite (3 tests, genuine publish/fetch/ack/nak/redelivery against a
+throwaway stream+consumer - never the live `TEAM_EVENTS`/
+`activity-insights-v1`), and a real-Atlas regression test (skips
+loudly, with a stated reason, if Atlas isn't reachable - never a false
+pass). `ruff check` and `mypy src` both clean.
+
+**Bug #1, found live (real Atlas, real NATS), not caught by the mocked
+suite**: the first real run against the actual backlog on
+`TEAM_EVENTS` (45 real events accumulated from Phases 4/4a/4c/4d)
+poisoned every single message with `InvalidOperation: Can only use
+session with the MongoClient that started it`. Root cause:
+`main.py` called both `get_client()` and `get_database()`, each
+constructing its own independent `AsyncIOMotorClient` - a Mongo
+session is only valid against the exact client that created it. Fixed
+by adding `db.py`'s `database_from_client()` and using one shared
+client for both the db handle and every session in `main.py`/
+`replay.py`. Confirmed fixed by a real-Atlas transaction round trip
+(`tests/test_real_mongo_integration.py`, added as the permanent
+regression guard - `tests/support/fake_mongo.py`'s fakes cannot model
+per-client session identity, so only a real-driver test could catch
+this class of bug). Full root cause in `docs/DECISIONS.md` #18.
+
+**Bug #2, found while investigating bug #1's cleanup**: `InboxRepository`
+and `ProcessingFailuresRepository` never accepted the `namespace`
+parameter `ItemStateRepository`/`WorkloadProjectionRepository`/
+`ActivityProjectionRepository`/`ConsumerStateRepository` already had -
+so a namespaced run (replay, or the real-Atlas test) still wrote its
+inbox/failure records into the **live** `inbox`/`processing_failures`
+collections instead of its own namespace. Caught by inspecting the
+real database after the real-Atlas test run (one stray `inbox`
+document under the live collection, not the test's namespace). Fixed
+by adding `namespace` support to both repositories; the stray document
+and the earlier bug's 45 bogus `PROCESSING_BUG` failure records (and
+the empty leftover namespaced collections from before the fix) were
+all identified and deleted from the real `insights_db` - see
+`docs/DECISIONS.md` #19.
+
+**Operator decision requested and granted**: fixing bug #1 came too
+late for the `activity-insights-v1` durable consumer's *first* pass
+over the real backlog - it had already advanced its ack floor to
+stream sequence 45 under the buggy code (every message technically
+acked, since "poisoned" is still an ack-eligible outcome). Re-deriving
+real projections required deleting and recreating the durable
+consumer (resets its ack floor so it replays full history under the
+fixed code) - a shared-JetStream-infrastructure action this session's
+own auto-mode guardrails correctly declined to take without the user's
+explicit go-ahead. Asked; the user chose "delete and recreate now."
+
+**Bug #3, found immediately after that reset, mid-replay of the real
+backlog**: processing hung for over a minute on one specific message
+and had to be killed. Isolated and reproduced in under a minute once
+suspected: `ItemStateRepository.apply_event`'s original design used
+an unconditional upsert filtered on `version: {"$lt": newVersion}`
+and treated the `DuplicateKeyError` raised when a document already
+existed under that `_id` (but the version filter didn't match) as the
+"stale, no-op" signal. Inside a multi-document MongoDB transaction,
+this is a fundamentally broken pattern: the server marks the *entire
+transaction* aborted as soon as that error occurs, regardless of it
+being caught client-side, so the next operation (ultimately,
+`commitTransaction`) fails with a `TransientTransactionError`-labeled
+`NoSuchTransaction`, which Motor's `with_transaction` retries by
+re-running the *whole body* - hitting the identical deterministic
+error every time, so the retry loop cannot converge; it only spins
+until its own ~2-minute internal budget runs out. Fixed by replacing
+the upsert-and-react pattern with a plain `find_one` read followed by
+a conditional write - `STALE` is now decided before any write is
+attempted, which can never poison a transaction. Confirmed fixed by
+re-running the exact message that had hung (resolved instantly) and by
+the full automated suite (42/42, updated to match - one test's
+monkeypatch target moved from the now-removed `find_one_and_update` to
+`find_one`). Full root cause in `docs/DECISIONS.md` #20.
+
+**Live run, complete, after all three fixes**: with the durable
+consumer reset a second time (clean full replay under fully-fixed
+code) and `insights_db`'s Phase 5 collections cleared of every bug-era
+artifact, the real service was run against the real local NATS server
+and real Atlas and consumed the entire real `TEAM_EVENTS` backlog (45
+messages, sequence 1-45) with **zero crashes, zero hangs**:
+`GET /health/consumer` reported `lastProcessedStreamSeq: 45`,
+`connected: true`; the JetStream broker's own `consumer_info` agreed
+independently (`ack_floor.stream=45`, `num_pending=0`,
+`num_ack_pending=0` - two independent observers agreeing, the same
+evidentiary standard Phase 4c used for its PubAck check). The real
+backlog turned out to be almost entirely test fixtures accumulated
+across Phases 1-4's own test runs (a mismatched-aggregate test
+envelope, several repeated-version-1 fixtures from the same default
+test aggregate, and one genuinely malformed "SMOKE" test message at
+sequence 37) rather than clean business data - every one of them was
+still handled correctly and classified honestly (`processed` /
+`stale_version` / `duplicate` / `poisoned` as appropriate; a few
+`duplicate` results came from a genuine race between this consumer's
+fire-and-forget `msg.ack()` and the next `fetch()` call occasionally
+re-receiving a not-yet-server-acked message - caught cleanly by the
+inbox, not a bug). Separately ran `python -m activity_insights.replay
+--namespace replay_real_1_` against the same real stream (its own,
+throwaway, now-deleted consumer - never `activity-insights-v1`) and
+got a complete, consistent accounting of all 45 messages
+(44 inbox/activity records + 1 poisoned = 45); its namespaced
+collections and consumer were deleted afterward, confirming replay
+itself works on real data and leaves no trace when cleaned up. A live
+Core NATS `tm.query.v1.project_insights` request against the running
+service returned a genuine `{"status": "not_ready", "reason":
+"NO_DATA_YET_FOR_PROJECT"}` for a project with no recorded activity -
+the real responder, answering for real.
+
+No changes to `management_db`, the Management Service's code, or any
+`.env` secret value at any point this phase.
+
+### Phase 5a notes (final live end-to-end workload verification, and the ack_wait "drift" re-examined)
+
+Created real data through the real running Management Service (real
+`.env`, real Atlas `management_db`, no mocks), using the seeded dev
+workspace/users (`npm run seed`: Alice/Bob/Carol/Dave,
+`aaaaaaaaaaaaaaaaaaaaaaaa`):
+
+1. `POST /api/teams` - team `PH51791358463` ("Phase5 Verify Team"),
+   `id=6ac5f5ffcbe07abdaad58fef`, created by Alice (first `OWNER`).
+2. `POST /api/teams/:id/members` x3 - Carol and Dave as `MEMBER`, Bob
+   as `LEAD`.
+3. `POST /api/projects` - `PH5VER` ("Phase5 Verify Project"),
+   `id=6ac5f61dcbe07abdaad58ff6`, owner Alice, team above (also
+   creates its board, `id=6ac5f61ecbe07abdaad58ff9`).
+4. `POST /api/projects/:id/items` x2 - item A (`PH5VER-1`,
+   `id=...58ffb`, `TASK`/`HIGH`, assignee Carol, starts in `Backlog`)
+   and item B (`PH5VER-2`, `id=...58ffd`, `BUG`/`MEDIUM`, assignee
+   Dave, starts in `Backlog`).
+5. `POST /api/items/:id/move` - item A to `In Progress`.
+6. `POST /api/items/:id/assign` - item B reassigned Dave -> Bob
+   (first attempt correctly rejected 400 until Bob was added as a
+   team member - the "assigneeId must be an active member of this
+   project's owning team" rule firing exactly as documented).
+
+All 11 resulting domain events (`team.created`, `team.member_added`
+x3, `project.created`, `project.team_assigned`, `board.created`,
+`workitem.created` x2, `workitem.moved`, `workitem.assigned`) were
+published to the real `TEAM_EVENTS` stream, taking it from `last_seq`
+45 to **56** (confirmed via `GET http://localhost:8222/jsz?streams=true`).
+The running Python service's `GET /health/consumer` reached
+`lastProcessedStreamSeq: 56` within seconds, with no restart and no
+intervention - the live, already-running consumer genuinely caught up
+in real time.
+
+**Verified non-zero, non-duplicated workload counts**, both through
+the real NestJS BFF (`GET /api/projects/:projectId/insights`) and
+directly over Core NATS (`tm.query.v1.project_insights`, bypassing
+NestJS) - identical payloads from both:
+
+```json
+{"status":"ok","data":{"projectId":"6ac5f61dcbe07abdaad58ff6",
+ "workloadByAssignee":[{"assigneeId":"...0003","count":1},
+                        {"assigneeId":"...0004","count":0},
+                        {"assigneeId":"...0002","count":1}],
+ "countsByStatus":[{"columnId":"11473638-...","count":1},
+                    {"columnId":"4b0b30c3-...","count":1}],
+ "workloadByPriority":[{"priority":"HIGH","count":1},
+                        {"priority":"MEDIUM","count":1}],
+ "lastProcessedSequence":56}}
+```
+
+This is exactly the expected result: Carol (item A's assignee,
+untouched) = 1, Dave (item B's *original* assignee, reassigned away)
+correctly = **0** (not absent, not negative - the decrement-on-
+reassignment math from `docs/DECISIONS.md` #17 verified on real data
+for the first time), Bob (item B's new assignee) = 1; one item in
+`Backlog` (B), one in `In Progress` (A, after the move); one `HIGH`,
+one `MEDIUM`. Cross-checked against the Management Service's own
+authoritative state (`GET /api/items/:id` for both items) - `columnId`/
+`priority`/`assigneeId`/`version` match the Python projection's
+`item_state` exactly, field for field.
+
+**Activity projection confirmed complete and non-duplicated**: exactly
+7 entries for this `projectId` (`project.created`,
+`project.team_assigned`, `board.created`, 2x `workitem.created`,
+`workitem.moved`, `workitem.assigned`) - `team.created`/
+`team.member_added` are correctly absent (not project-scoped). All 7
+`_id`s (the eventId) are unique - no duplicate activity records.
+`inbox` grew by exactly 11 (39 -> 50), one per genuinely new event.
+The live consumer log shows the *same* benign ack-before-settle race
+already documented for the historical backlog on 5 of these 11
+messages (a `processed` result immediately followed by a `duplicate`
+for the identical `stream_seq`/`eventId`) - each one correctly
+deduped by the inbox, contributing nothing extra to any count. This is
+exactly the scenario the inbox dedup exists for, now observed on fresh
+live traffic, not just backlog replay.
+
+**ack_wait re-examined, and the earlier diagnosis corrected**: per the
+instruction to inspect this and reconcile config vs. documentation,
+re-tested the live `activity-insights-v1` consumer's reported
+`ack_wait` (still 1.0s) against two freshly-created throwaway
+consumers on the real server - one with `ack_wait=10` and
+`backoff=[2,4]` (reported `ack_wait: 2.0`, i.e. `backoff[0]`), one with
+`ack_wait=10` and no `backoff` (reported `ack_wait: 10.0`, honored
+exactly). This proves the 1s value is **correct JetStream behavior
+given this consumer's own configured `backoff` array**, not
+provisioning staleness - the earlier note in `docs/EVENT_CATALOG.md`
+(written during Phase 5's first pass) asserting a Node-side
+reconciliation bug was itself wrong and has been corrected in place,
+with the real mechanism explained and a new decision record added
+(`docs/DECISIONS.md` #21). No code change was needed or made -
+`jetstream.config.ts`'s `ack_wait: nanos(30_000)` is harmlessly inert
+once `backoff` is set, not a bug worth touching Management Service
+code for.
+
+Full automated suite (`pytest`, 42/42), `ruff check`, and `mypy src`
+re-confirmed clean after this session (no source changes this round -
+verification and documentation only). Nothing committed or pushed.

@@ -17,8 +17,15 @@ class Settings(BaseSettings):
     mongodb_db_name: str = Field(default="insights_db", alias="MONGODB_DB_NAME")
 
     nats_url: str = Field(default="nats://localhost:4222", alias="NATS_URL")
+    # Assignment-mandated durable consumer name - must match the
+    # Management Service's ACTIVITY_INSIGHTS_DURABLE_CONSUMER
+    # (subjects.ts) exactly, since Phase 4 already provisioned a real
+    # durable consumer under this name (see events/subjects.py). The
+    # previous default here ("activity-insights-service") never
+    # matched the already-provisioned consumer - fixed as part of
+    # Phase 5, before anything ever depended on the wrong value.
     nats_durable_consumer_name: str = Field(
-        default="activity-insights-service", alias="NATS_DURABLE_CONSUMER_NAME"
+        default="activity-insights-v1", alias="NATS_DURABLE_CONSUMER_NAME"
     )
 
 

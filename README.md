@@ -74,6 +74,15 @@ connect to MongoDB Atlas via their own `.env` files (see each service's
   (13/13 checks) - see [`docs/DECISIONS.md`](docs/DECISIONS.md) #11/#16
   and [`docs/TIMELOG.md`](docs/TIMELOG.md) Phase 4c.
 
-**Not yet implemented**: the Python-side event consumer/projection
-logic (Phase 5 - the durable consumer is provisioned but nothing
-consumes from it yet) and the AdminLTE admin UI.
+- **Phase 5**: the Python Activity & Insights Service now consumes
+  `TEAM_EVENTS` via the `activity-insights-v1` durable consumer -
+  inbox deduplication, version-gated projections
+  (`activity_projection`/`workload_projection`), a poison path for
+  malformed/unsupported events, bounded retry for transient Mongo
+  failures, a real `tm.query.v1.project_insights` Core NATS responder,
+  consumer-state health reporting, and a replay script. See
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) "Python inbox and
+  projections" and [`docs/TIMELOG.md`](docs/TIMELOG.md) Phase 5 notes
+  for the automated and live-run evidence.
+
+**Not yet implemented**: the AdminLTE admin UI (Phase 6).

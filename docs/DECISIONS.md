@@ -288,6 +288,14 @@ sequence existed. This is now a fully live-confirmed guarantee, not
 only a structural inference - see `docs/TIMELOG.md` Phase 4a/4c notes
 for the full run.
 
+**Reproducibility confirmed by a second independent run:** the user
+re-ran the same live verification again (Phase 4d). Result: 13/13
+again, with the stream sequence correctly advanced to 45 (from 44 in
+Phase 4c) and manually cross-checked against the relay's own log line
+for the same value - matching, as in 4c. Two independently clean runs
+rule out the first pass having been a fluke. **Status: Phase 4 is
+VERIFIED END-TO-END.** See `docs/TIMELOG.md` Phase 4d notes.
+
 ## 12. causationId chains multiple facts from one command; most events are command-root facts (Phase 4)
 
 **Decision:** When a single HTTP command produces more than one
@@ -436,3 +444,192 @@ self-heal on its own - the app must call `.connect()` again); claiming
 a transient Atlas blip is now impossible (it isn't - the fix is that
 it's now *recoverable within seconds* via the next tick/ping, not
 fatal for the process's remaining lifetime).
+
+## 17. Workload counters are derived from item_state's own before/after snapshot, never from an event's claimed "previous" value (Phase 5)
+
+**Decision:** `projections/workload.py`'s delta math (decrement old
+bucket, increment new bucket) reads the "old" value from the actual
+document `projections/state.py`'s version-gated `find_one_and_update`
+returns as `return_document=ReturnDocument.BEFORE`, never from the
+incoming event's own `previousAssigneeId`/`fromColumnId` payload
+fields.
+
+**Why:** Those payload fields describe what the *Management Service*
+believed the previous value was at command time - correct for a
+normally-ordered delivery, but not something the Python consumer can
+safely trust after a redelivery or a genuinely out-of-order arrival,
+because by the time a stale or duplicate copy of that event is
+(re)delivered, this service's own `item_state` may already reflect a
+*later* event's change. Trusting the event's own claim could double-
+decrement a bucket a later event already moved away from. Deriving the
+delta from this service's own persisted prior state, gated by the same
+version check that produces the `STALE` outcome for out-of-order
+events, means a delta is only ever computed from a transition that
+*this consumer* verified actually happened in that order - the `$inc`
+operation itself is not idempotent, but applying it is only reachable
+through a path (inbox-dedup AND version-gate both passed) that itself
+can only be reached once per genuine transition.
+
+**Rules out:** trusting `payload.previousAssigneeId`/`fromColumnId`/
+`previousColumnId` for projection math (kept in the payload only for
+human/audit readability and parity with the documented envelope
+shape); a design that needs its own separate "has this delta already
+been applied" ledger (the version gate already is one, for free).
+
+## 18. One MongoClient per process, shared between the db handle and every session (Phase 5)
+
+**Decision:** `db.py`'s `get_database()` (which internally calls
+`get_client()`) is for callers that need a database handle only.
+Anything that will *also* call `client.start_session()` - the live
+service (`main.py`), replay (`replay.py`), the real-Atlas regression
+test - must instead call `get_client()` once and derive the database
+handle from that *same* client via the new `database_from_client()`,
+never call `get_database()` separately alongside it.
+
+**Why:** Hit live, on this phase's first real run against real Atlas:
+every single event was "processed" successfully by the consumer's own
+error handling (never crashed, never hung) but came out as
+`PROCESSING_BUG` in `processing_failures` for literally every message,
+with the detail `InvalidOperation: Can only use session with the
+MongoClient that started it`. Root cause: `main.py` originally called
+both `get_client(settings)` (for `EventProcessor`'s session-starting
+client) and `get_database(settings)` (for the collections) - each of
+which constructs its own independent `AsyncIOMotorClient`. A MongoDB
+session is a protocol-level handle scoped to the exact client
+connection that created it; a collection obtained from a *different*
+client instance refuses to accept it. Nothing in local unit testing
+caught this because `tests/support/fake_mongo.py`'s fakes don't model
+per-client session identity at all (a real gap in the mocked suite,
+not a false negative to paper over) - only `test_real_mongo_integration.py`,
+run against the real driver, could and did catch it. The bug's blast
+radius was real: the already-provisioned `activity-insights-v1`
+durable consumer had already acked all 45 backlog messages as
+"poisoned" by the time this was found (see `docs/TIMELOG.md` Phase 5
+notes for the recovery).
+
+**Rules out:** constructing more than one `AsyncIOMotorClient` per
+process for the live service (wasteful connection pooling, and this
+exact bug class); "it imported without error so it's fine" as
+sufficient evidence for anything that touches a real session - only a
+real-driver test proved this class of bug, and the mocked suite's
+blind spot here is recorded explicitly rather than quietly papered
+over.
+
+## 19. Replay uses a brand-new durable consumer and namespaced collections, never the live ones (Phase 5)
+
+**Decision:** `replay.py` never binds to the assignment-mandated
+`activity-insights-v1` consumer (owned, created, and never altered by
+the Management Service's `StreamBootstrapService` - Python only ever
+*reads* from it in normal operation). It creates a separate durable
+consumer (default name derived from `--namespace`) on the same real
+`TEAM_EVENTS` stream with `deliver_policy=all`, and every repository
+it constructs is parameterized with a `namespace` prefix applied to
+every collection name it touches (`inbox`, `item_state`,
+`activity_projection`, `workload_projection`, `consumer_state`) -
+including `processing_failures`/`inbox`, which initially were missed
+(see Decision #18's sibling bug: `InboxRepository`/
+`ProcessingFailuresRepository` were only given `namespace` support
+after a test run leaked one stray document into the live `inbox`
+collection - found, cleaned up, fixed before being reported as done).
+
+**Why:** "Support replay into a clean projection without touching
+Management Service data" (assignment) needs more than "don't write to
+management_db" - a replay that reused the live `insights_db`
+collections would silently corrupt the real projections with a second
+pass over history. A separate consumer on the real stream means
+replay genuinely proves "this history can be re-derived from
+JetStream alone," not a weaker claim backed by a synthetic/mocked
+message source.
+
+**Rules out:** a `--namespace ""` default (would target the live
+collections by construction - the CLI requires a non-empty value);
+replay as an HTTP endpoint (the assignment explicitly names this as
+an unsafe pattern to avoid); deleting/reusing the live
+`activity-insights-v1` consumer for replay purposes.
+
+## 20. Stale-version detection must be read-then-decide, never write-and-react-to-a-conflict, inside a multi-document transaction (Phase 5)
+
+**Decision:** `projections/state.py`'s `ItemStateRepository.apply_event`
+reads the current `item_state` document first (`find_one`) and only
+issues a write if the incoming event's `aggregate.version` is
+strictly greater than what's already recorded. An earlier
+implementation instead attempted an unconditional upsert with a
+`version: {"$lt": newVersion}` filter and treated the resulting
+`DuplicateKeyError` (when a document already existed under that `_id`
+but the version filter didn't match) as the signal for "stale, no
+write needed" - this is now recognized as wrong and was replaced.
+
+**Why:** Hit live, replaying the real historical backlog on
+`TEAM_EVENTS` under the Decision #18 fix: processing hung for over a
+minute on one specific message and had to be killed. Isolated
+reproduction showed the real mechanism: MongoDB transactions do not
+allow "catch a failed operation's error in application code and keep
+going" - once *any* command inside a transaction returns certain
+errors (`DuplicateKeyError` included), the **entire transaction** is
+marked aborted server-side, independent of whether the driver-level
+exception was caught. The very next operation in that same
+transaction - here, the final `commitTransaction` - then fails with
+`NoSuchTransaction`/"Transaction has been aborted", carrying the
+`TransientTransactionError` label. Motor's `with_transaction` treats
+that label as retryable and reruns the **entire transaction body**
+from scratch - which deterministically hits the identical
+`DuplicateKeyError` on every retry, so the retry loop cannot actually
+recover; it just spins until its own internal time budget (on the
+order of two minutes) is exhausted, then raises. A plain `find_one`
+read can never itself produce a transaction-poisoning error, so moving
+the stale/not-stale decision there - before any write is attempted -
+removes the failure mode entirely rather than handling it better.
+
+**Rules out:** "catch the exception and return a clean result" as a
+sufficient fix for any error-shaped control-flow *inside* a MongoDB
+transaction (the exception being caught client-side does not undo the
+server marking the transaction unusable - this generalizes beyond this
+one call site: no future code in this transaction body may rely on a
+write's error as a signal, only on a preceding read); papering over the
+symptom with a shorter transaction timeout or fewer retry attempts
+(would turn a silent-forever-hang into a fast, equally wrong, permanent
+failure instead of fixing the actual logic).
+
+## 21. `activity-insights-v1`'s reported `ack_wait` of 1s is correct, not provisioning drift - the earlier "drift" note in EVENT_CATALOG.md was itself wrong (Phase 5)
+
+**Decision:** No code change. `docs/EVENT_CATALOG.md`'s durable-consumer
+table is corrected to show both the *configured* `ack_wait` (30s,
+`jetstream.config.ts`) and the *effective, server-reported* one (1s),
+with an explanation, rather than asserting a single "30s" value that
+never matches what the real server reports.
+
+**Why:** A prior pass through this document (Phase 5's first pass)
+observed the live consumer reporting `ack_wait: 1s` and concluded this
+was staleness - an old consumer created before some config change,
+never reconciled by `StreamBootstrapService.ensureDurableConsumer`
+(which only creates a missing consumer, never updates an existing
+one's fields). That theory was never actually tested against a fresh
+consumer before being written down. This phase's final verification
+pass tested it directly: a brand-new throwaway consumer, created fresh
+against the real server with `ack_wait=10` and `backoff=[2, 4]`,
+*also* reports `ack_wait: 2.0` (i.e. `backoff[0]`) - immediately, on
+first creation, not after any staleness could occur. A second
+throwaway consumer with the same `ack_wait=10` and no `backoff` at all
+correctly reports `ack_wait: 10.0`. This isolates the real mechanism
+precisely: **JetStream always reports (and uses, for the first
+redelivery) `ack_wait = backoff[0]` whenever a `backoff` array is
+configured**, independent of whatever `ack_wait` was separately
+requested - they are not independent settings once both are set. Since
+`activity-insights-v1` has always been configured with
+`backoff: [1s, 5s, 30s, 120s]` (in every version of
+`jetstream.config.ts` that has existed), *every* correctly-provisioned
+instance of this consumer, at any point in this project's history,
+would report `ack_wait: 1s` - there was never a point in time where it
+would have correctly shown 30s. The actual mismatch was this
+documentation's own table asserting a number that cannot be observed
+under the system's own configuration.
+
+**Rules out:** "fixing" this by changing `jetstream.config.ts`'s
+`ack_wait: nanos(30_000)` to `nanos(1_000)` to "match reality" - the
+field is already functionally inert once `backoff` is set (the server
+ignores it beyond seeding `backoff[0]`, and `backoff[0]` already *is*
+1s), so changing it would change nothing observable and would not be
+worth the risk of touching Phase 4 Management Service code for a
+no-op edit; re-diagnosing this as a bug a second time without first
+isolating the mechanism with a controlled probe (the lesson applied
+here, and the thing the first pass skipped).
