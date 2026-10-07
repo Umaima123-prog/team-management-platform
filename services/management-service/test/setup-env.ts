@@ -19,3 +19,18 @@
 // database.service.spec.ts already covered Phase 2's DatabaseService.
 process.env.MONGODB_URI ??= 'mongodb://127.0.0.1:27017';
 process.env.MONGODB_DB_NAME ??= 'management_db_test';
+
+// Same reasoning for NATS: a deliberately unreachable local port (NOT
+// 4222, where this project's real local Docker NATS listens - keeping
+// the generic unit/e2e suite hermetic from it). The dedicated
+// real-NATS integration suite (test/nats-integration.e2e-spec.ts)
+// points at the real server explicitly instead of relying on this
+// default. See src/messaging/nats/nats-connection.service.ts - the
+// connection is lazy, so this only matters for code paths that
+// actually attempt to connect.
+process.env.NATS_URL ??= 'nats://127.0.0.1:4224';
+
+// Keeps the outbox relay's background setInterval out of the generic
+// unit/e2e suite (open-handle noise, irrelevant log spam) - the
+// dedicated NATS integration suite explicitly re-enables it.
+process.env.OUTBOX_RELAY_DISABLED ??= 'true';

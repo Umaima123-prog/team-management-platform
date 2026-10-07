@@ -22,7 +22,13 @@ export class WorkItemsController {
     @Param('projectId') projectId: string,
     @Body() dto: CreateWorkItemDto,
   ) {
-    const item = await this.workItemsService.createWorkItem(ctx.workspaceId, projectId, ctx.userId, dto);
+    const item = await this.workItemsService.createWorkItem(
+      ctx.workspaceId,
+      projectId,
+      ctx.userId,
+      dto,
+      ctx.correlationId,
+    );
     return withId(item);
   }
 
@@ -52,7 +58,13 @@ export class WorkItemsController {
     @Param('itemId') itemId: string,
     @Body() dto: UpdateWorkItemDto,
   ) {
-    const item = await this.workItemsService.updateWorkItem(ctx.workspaceId, itemId, dto);
+    const item = await this.workItemsService.updateWorkItem(
+      ctx.workspaceId,
+      itemId,
+      dto,
+      ctx.userId,
+      ctx.correlationId,
+    );
     return withId(item);
   }
 
@@ -62,7 +74,13 @@ export class WorkItemsController {
     @Param('itemId') itemId: string,
     @Body() dto: AssignWorkItemDto,
   ) {
-    const item = await this.workItemsService.assignWorkItem(ctx.workspaceId, itemId, dto);
+    const item = await this.workItemsService.assignWorkItem(
+      ctx.workspaceId,
+      itemId,
+      dto,
+      ctx.userId,
+      ctx.correlationId,
+    );
     return withId(item);
   }
 
@@ -72,7 +90,13 @@ export class WorkItemsController {
     @Param('itemId') itemId: string,
     @Body() dto: MoveWorkItemDto,
   ) {
-    const item = await this.workItemsService.moveWorkItem(ctx.workspaceId, itemId, dto);
+    const item = await this.workItemsService.moveWorkItem(
+      ctx.workspaceId,
+      itemId,
+      dto,
+      ctx.userId,
+      ctx.correlationId,
+    );
     return withId(item);
   }
 
@@ -86,6 +110,8 @@ export class WorkItemsController {
       ctx.workspaceId,
       itemId,
       dto.expectedVersion,
+      ctx.userId,
+      ctx.correlationId,
     );
     return withId(item);
   }

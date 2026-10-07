@@ -24,7 +24,15 @@ export const mongoClientProvider: Provider = {
   provide: MONGO_CLIENT,
   useFactory: (config: ConfigService) => {
     const uri = requireEnv(config, 'MONGODB_URI');
-    return new MongoClient(uri, { serverSelectionTimeoutMS: 2000 });
+    // 10s, not the previous 2s: short enough to bound a request (no
+    // unbounded hangs), long enough to tolerate ordinary Atlas latency
+    // and a free-tier (M0) cluster waking up, so the very first
+    // connection attempt doesn't spuriously fail under normal
+    // conditions - see docs/DECISIONS.md #16 for why that first
+    // failure used to be catastrophic (the driver permanently closes
+    // its topology on a failed connect) and DatabaseService.ensureConnected()
+    // for the self-healing half of that fix.
+    return new MongoClient(uri, { serverSelectionTimeoutMS: 10_000 });
   },
   inject: [ConfigService],
 };

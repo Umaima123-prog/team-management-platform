@@ -3,7 +3,27 @@
 ## Implementation status (read this first)
 
 This document describes the **target architecture** for the Team
-Management Platform. As of Phase 3, the following exist:
+Management Platform. As of Phase 4, the following exist:
+
+- **Messaging reliability** (Phase 4): the transactional outbox
+  (`outbox_events` collection in `management_db`, written inside the
+  same MongoDB session/transaction as the authoritative domain
+  mutation), a background publisher relay that publishes unpublished
+  outbox rows to the real `TEAM_EVENTS` JetStream stream and marks
+  them published only after a genuine publish acknowledgement,
+  bounded-retry/backoff failure handling with an operator-visible
+  terminal-failure path, a correlation-id middleware/guard, a `GET
+  /api/projects/:projectId/insights` BFF endpoint backed by Core NATS
+  request/reply with a bounded timeout and typed fallback, and
+  extended `GET /health/ready` diagnostics. See "Transactional
+  outbox", "JetStream", "Outbox publisher relay", and "Core NATS
+  request/reply" below for the real (not target) shape of each, and
+  `docs/EVENT_CATALOG.md` for the exact subjects now emitted by which
+  Phase 3 commands. **Not implemented in Phase 4**: the Python
+  consumer that actually processes delivered events into projections
+  (Phase 5) - the durable consumer `activity-insights-v1` is
+  provisioned and verified reachable, but nothing yet acknowledges a
+  delivered message.
 
 - Repository/service skeletons (NestJS management-service, Python
   activity-insights-service) with no business logic.
@@ -12,8 +32,10 @@ Management Platform. As of Phase 3, the following exist:
   (file-backed, 1GB memory / 10GB storage limits per
   `docker/nats/nats-server.conf`), the `tm-nats-jetstream-data` volume
   is correctly mounted at `/data/jetstream`, and startup logs show no
-  errors. No streams/consumers exist yet - nothing publishes or
-  consumes events.
+  errors. As of Phase 4, the `TEAM_EVENTS` stream and the
+  `activity-insights-v1` durable consumer exist on this server (created
+  idempotently by `StreamBootstrapService` on app boot) and real
+  events are being published to it - see "JetStream" below.
 - **MongoDB persistence foundation** (Phase 2): each service connects
   to its own Atlas database via a driver client built entirely from
   environment variables (no hardcoded URI anywhere - see
@@ -55,14 +77,16 @@ Management Platform. As of Phase 3, the following exist:
   workspace + a few users.
 - This documentation set.
 
-Nothing about the **outbox relay, JetStream event publishing/
-consumption, projection logic, or the activity_projection/
-workload_projection/processing_failures collections** is implemented
-yet - domain writes in Phase 3 land only in `management_db`; nothing
-is published anywhere, and the Python service has nothing new to
-consume. The AdminLTE UI also does not exist yet. Each later phase
-that implements a piece of this design must update this file so it
-keeps describing the current implementation, not just the plan.
+As of Phase 4, domain writes land in `management_db` **and** produce
+durable, versioned, correlation-tracked facts on the real local
+JetStream server - see "Transactional outbox" / "JetStream" / "Outbox
+publisher relay" below. What remains not implemented: **Python-side
+event consumption/projection logic** (the `activity_projection`/
+`workload_projection`/`processing_failures` collections and the
+consumer loop that would populate them - Phase 5), and **the AdminLTE
+UI**. Each later phase that implements a piece of this design must
+update this file so it keeps describing the current implementation,
+not just the plan.
 
 ## Service ownership
 
@@ -71,12 +95,12 @@ Two services, two databases, no shared collections.
 ### Management Service (NestJS + TypeScript)
 
 Owns, and is the only writer of, `management_db`. Collections that
-exist today (Phase 3): `workspaces`, `users`, `teams`, `memberships`,
+exist today (Phase 4): `workspaces`, `users`, `teams`, `memberships`,
 `projects`, `boards` (columns are embedded in the board document, not
 a separate collection), `work_items`, `counters` (the atomic
-issue-key sequence generator - see "Business domain" below). `outbox`
-does **not** exist yet - the transactional outbox below is still
-target design, not implemented.
+issue-key sequence generator - see "Business domain" below), and
+`outbox_events` (the transactional outbox - see "Transactional
+outbox" below).
 
 It is the system of record for all business/domain state and the only
 service that accepts write commands for that state.
@@ -178,51 +202,79 @@ The authoritative domain, in creation/dependency order:
 Every list endpoint that needs to scale uses opaque cursor (keyset)
 pagination on `_id`, not offset/skip - see `docs/API.md`.
 
-## Command flow (target design - not yet implemented)
-
-The outbox/JetStream pipeline below remains the target design for
-when domain events need to leave the Management Service. Phase 3's
-actual write path stops at step 2: a command validates, writes the
-aggregate with its optimistic-concurrency check, and returns - there
-is no outbox record, no relay, and nothing is published anywhere yet.
+## Command flow (implemented, Phase 4)
 
 1. A client issues a write command to the Management Service (e.g.
-   `POST /workspaces`).
-2. The Management Service validates the command and, in a single
-   MongoDB transaction:
+   `POST /api/teams`).
+2. The Management Service validates the command (membership-role
+   checks, cross-workspace reference checks, etc. - all outside the
+   transaction, read-only) and then, in a single MongoDB session
+   transaction (`DatabaseService.withTransaction`):
    - applies the change to the owning aggregate (with an optimistic
      concurrency check - see below), and
-   - inserts a corresponding record into the `outbox` collection.
+   - builds and validates a canonical event envelope and inserts it
+     into `outbox_events` (`OutboxService.enqueue`, see
+     `docs/EVENT_CATALOG.md`).
 3. The HTTP response returns once the transaction commits. The caller
-   gets a definitive success/failure answer without waiting on NATS.
-4. A relay process (part of the Management Service) polls/tails the
-   `outbox` collection and publishes each pending record to JetStream,
-   then marks it published.
-5. The Python service's durable JetStream consumer receives the event,
-   persists an inbox record keyed by `event_id`, applies the
-   projection update, and only then acknowledges the message.
+   gets a definitive success/failure answer without waiting on NATS -
+   if either the aggregate write or the outbox insert fails, both roll
+   back together; there is no window where one happened without the
+   other.
+4. `OutboxRelayService` (part of the Management Service, polling every
+   `OUTBOX_RELAY_INTERVAL_MS`, default 1s) atomically claims unpublished
+   rows, publishes each to the `TEAM_EVENTS` JetStream stream with
+   `Nats-Msg-Id` set to the event's `eventId`, waits for a real publish
+   acknowledgement, and only then marks the row published.
+5. (Phase 5) The Python service's durable JetStream consumer
+   (`activity-insights-v1`, provisioned in Phase 4) will receive the
+   event, persist an inbox record keyed by `eventId`, apply the
+   projection update, and only then acknowledge the message.
 
 Steps 4-5 are asynchronous relative to step 3: callers see transactional
 consistency for their own write, and everyone else sees the effect of
 that write only after the event has propagated (eventual consistency).
+Step 5 is not yet implemented - see "Implementation status" above.
 
 ## Transactional outbox
 
 Mongo transactions are per-database, so "write the aggregate and emit
 an event" cannot be a single operation spanning the database and NATS.
 The outbox pattern makes it atomic within MongoDB instead: the aggregate
-write and the outbox record are written in the same transaction, so a
+write and the outbox record are written in the same transaction
+(`src/database/database.service.ts`'s `withTransaction`, used by
+`TeamsService`/`ProjectsService`/`WorkItemsService` for every command
+that emits a documented fact - see `docs/EVENT_CATALOG.md`), so a
 crash can never produce "state changed but no event" or "event queued
-but state unchanged." A separate relay then has the simpler job of
-publishing outbox rows to JetStream at-least-once (retrying until NATS
-acknowledges), and marking them published. If the relay crashes between
-publish and marking-published, it republishes on restart - this is why
-consumers must be idempotent (see below).
+but state unchanged." See `docs/DECISIONS.md` #11: transaction support
+on the configured Atlas deployment was first established structurally
+(replica-set topology evidence), then **confirmed by a live run** -
+`POST /api/teams` against real Atlas produced a matching team document
+and `outbox_events` row, cross-referenced consistently and committed
+together, exactly as designed.
+
+A separate relay (`src/messaging/relay/outbox-relay.service.ts`) then
+has the simpler job of publishing outbox rows to JetStream
+at-least-once (bounded retry with exponential backoff - see
+`retry-policy.ts`), and marking them published **only after** a real
+publish acknowledgement. If the relay crashes between publish and
+marking-published, it republishes on restart - this is why consumers
+must be idempotent (see below), and why this system never claims
+exactly-once delivery (`docs/DECISIONS.md` #4). `OutboxRepository`
+claims rows atomically (`findOneAndUpdate` with a claim lease), which
+is also what keeps two concurrent relay ticks/instances from
+double-publishing the same row.
+
+Terminal (non-retryable, or retry-budget-exhausted) failures set
+`failedAt`/`lastErrorCode` on the row and are never retried
+automatically again; `GET /health/ready`'s `messaging.failedOutboxCount`
+is the operator-visible signal for this (`MessagingHealthService`).
 
 ## JetStream (durable domain events)
 
 All domain events that other services depend on for eventual
-consistency are published to JetStream streams, not Core NATS. JetStream
+consistency are published to the `TEAM_EVENTS` JetStream stream
+(`subjects: tm.v1.>`, file storage, see `docs/EVENT_CATALOG.md` for
+the full retention/consumer configuration), not Core NATS. JetStream
 gives:
 
 - **Durability**: events persist even if the Python service is down
@@ -232,11 +284,14 @@ gives:
 - **At-least-once delivery** with consumer acknowledgement, so a
   crashed consumer re-receives unacknowledged messages.
 
-Subjects follow the `tm.v1.<aggregate>.<event>` convention - see
-`EVENT_CATALOG.md` for the planned subject list and the canonical
-envelope shape.
+Subjects follow the `tm.v1.<eventType>` convention - see
+`EVENT_CATALOG.md` for the full subject list and the canonical
+envelope shape (both implemented, Phase 4). Stream and durable-consumer
+bootstrap is idempotent (`StreamBootstrapService`, verified against a
+real local server in `test/nats-integration.e2e-spec.ts`): it never
+silently replaces a structurally different existing stream.
 
-## Python inbox and projections
+## Python inbox and projections (target design - Phase 5)
 
 Because JetStream delivery is at-least-once, the same event can arrive
 more than once (consumer crash-and-redeliver, network retry, etc.). The
@@ -262,16 +317,33 @@ the consumer idempotent under at-least-once delivery.
 ## Core NATS request/reply
 
 Not every interaction needs durability. When a caller wants a synchronous
-answer to an insights question ("what's this workspace's current
+answer to an insights question ("what's this project's current
 workload breakdown?"), the Python service answers over plain Core NATS
-request/reply:
+request/reply on `tm.query.v1.project_insights`:
 
 - No persistence of the request itself is needed - if no responder is
-  listening, the caller gets a timeout, which is an acceptable failure
-  mode for a read query (the caller can retry or show a loading error).
+  listening, the caller gets a fast "no responders" failure (or a
+  bounded timeout if a responder is present but slow), which is an
+  acceptable failure mode for a read query (the caller can retry or
+  show a loading error) - never an unbounded wait.
 - This keeps the read path cheap and avoids forcing every query through
   JetStream's durability machinery, which exists to protect domain
   events, not point-in-time reads.
+
+**Implemented (Phase 4, NestJS/BFF side)**: `InsightsClientService`
+(`src/messaging/insights/`) and `GET /api/projects/:projectId/insights`
+(`ProjectsController`). Always returns HTTP 200 with a typed
+`status` - `ok` (with data), `pending` (timeout), `unavailable`
+(no responder / NATS not connected / malformed reply), or `not_ready`
+(a well-formed "not yet caught up" reply from the responder) - never a
+500 for these legitimate eventual-consistency states (TM-12). Bounded
+by `INSIGHTS_QUERY_TIMEOUT_MS` (default 2s); verified against both a
+real stub responder and genuine no-responder/timeout conditions on a
+real local NATS server (`test/nats-integration.e2e-spec.ts`).
+
+**Not yet implemented**: the actual Python responder (Phase 5) - Phase
+4's tests use a stub responder, never claimed as the real Python
+service.
 
 ## Optimistic concurrency and HTTP 409
 
@@ -299,6 +371,45 @@ updated" bounded by outbox-relay latency plus JetStream delivery
 latency. No part of this system claims or relies on exactly-once or
 immediate cross-service consistency; at-least-once delivery and
 idempotent consumers are the explicit, documented guarantee.
+
+## Correlation / observability (Phase 4)
+
+`CorrelationIdMiddleware` (`src/common/context/`, applied globally in
+`AppModule.configure`, runs before every guard including the health
+checks) accepts a valid caller-supplied `X-Correlation-Id` or
+generates one, and echoes it back on the response header.
+`RequestContextGuard` folds it into `RequestContext.correlationId`,
+which every event-emitting service method threads through to
+`OutboxService.enqueue` (the envelope's `correlationId`) and from
+there `OutboxRelayService` sets it as the `X-Correlation-Id` NATS
+header on publish, and `InsightsClientService` sets it on every
+request/reply query. Structured log lines from the relay and insights
+client (`src/messaging/logging/messaging-log.ts`) always include
+`service`, `correlationId`, `eventId`, `aggregateId`, `subject`,
+`attempt`, `latencyMs`, and `result` - the assignment's named
+traceability field set - end to end from HTTP command through outbox
+row through publish through (future, Phase 5) consumer log.
+
+## Health model (Phase 4)
+
+- **Liveness** (`GET /health`): process is up, never touches MongoDB
+  or NATS.
+- **Readiness** (`GET /health/ready`): 200/503 gated on MongoDB
+  connectivity only (unchanged from Phase 2/3); the response body also
+  reports `messaging: { natsConnected, jetstreamReady,
+  unpublishedOutboxCount, failedOutboxCount }` as a diagnostic that
+  never flips the HTTP status - see `docs/DECISIONS.md` #13 for why
+  gating on NATS too would be the wrong call for an outbox-based
+  architecture specifically.
+- Both the readiness check and the outbox relay self-heal a MongoDB
+  connection whose topology closed itself after a failed first
+  connection attempt (`DatabaseService.ensureConnected()`, called
+  before every ping and every relay tick) - a real bug reproduced live
+  against Atlas, fixed, and the fix itself since confirmed by a clean
+  live re-run (13/13 checks, `docs/TIMELOG.md` Phase 4c); see
+  `docs/DECISIONS.md` #16 for the root cause.
+- The Python service's own health/readiness/consumer-lag reporting is
+  Phase 5 scope - not implemented yet.
 
 ## Security baseline (Phase 3)
 
@@ -332,6 +443,16 @@ mistakes (unauthenticated operational endpoints, no rate limiting):
 - **Workspace isolation & cross-reference rejection**: see "Request
   context / trust model" and "Business domain" above - enforced
   server-side on every read and write, not advisory.
+- **No secret leakage in messaging logs/errors** (Phase 4): the same
+  discipline as MongoDB errors extends to NATS - `NatsConnectionService`
+  logs only `error.name`/`error.message` from the NATS client, never
+  `NATS_URL` itself; outbox `lastErrorCode` stores only a fixed,
+  non-secret classification enum (`PublishErrorCode`), never a raw
+  driver/NATS error string. Local dev NATS runs with no auth configured
+  (`docker/nats/nats-server.conf` says so explicitly); if credentials
+  are added later, the same "log the variable name, never the value"
+  rule already applied to `MONGODB_URI` applies identically to
+  `NATS_URL`.
 
 ## Database setup (MongoDB Atlas)
 
@@ -397,3 +518,13 @@ volume `tm-nats-jetstream-data`), so streams and consumers survive
 container restarts during development. MongoDB is **not** run locally
 via Docker - both services connect to MongoDB Atlas, configured through
 each service's own `.env` (never committed; see `.env.example` files).
+
+The Management Service connects to this local NATS via `NATS_URL`
+(`.env`/`.env.example`, default `nats://localhost:4222`) - lazily, on
+first real use, the same pattern as the Mongo client (Phase 2). On
+boot it idempotently bootstraps the `TEAM_EVENTS` stream and the
+`activity-insights-v1` durable consumer (`StreamBootstrapService`),
+and starts the in-process outbox publisher relay
+(`OutboxRelayService`) on a timer (`OUTBOX_RELAY_INTERVAL_MS`, default
+1s). None of this blocks app boot or `GET /health` if NATS happens to
+be unreachable - see "Health model" above.

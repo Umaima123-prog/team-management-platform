@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from '@nestjs/common';
-import { Filter, ObjectId } from 'mongodb';
+import { ClientSession, Filter, ObjectId } from 'mongodb';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceScopedRepository } from '../database/workspace-scoped.repository';
 import { conditionalUpdate } from '../common/mongo/conditional-update';
@@ -29,8 +29,8 @@ export class TeamsRepository extends WorkspaceScopedRepository<TeamDocument> {
     return this.findScoped(workspaceId, filter, { sort: { createdAt: -1 } });
   }
 
-  async create(team: NewTeam) {
-    const existing = await this.findByCode(team.workspaceId, team.code);
+  async create(team: NewTeam, session?: ClientSession) {
+    const existing = await this.findOneScoped(team.workspaceId, { code: team.code }, { session });
     if (existing) {
       throw new ConflictException({
         code: ErrorCode.CONFLICT,
@@ -47,7 +47,7 @@ export class TeamsRepository extends WorkspaceScopedRepository<TeamDocument> {
       updatedAt: now,
     };
     try {
-      const result = await this.collection.insertOne(toInsert);
+      const result = await this.collection.insertOne(toInsert, { session });
       return { ...toInsert, _id: result.insertedId };
     } catch (error) {
       // Belt-and-suspenders against the race between the check above

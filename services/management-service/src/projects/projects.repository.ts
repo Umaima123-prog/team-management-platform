@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from '@nestjs/common';
-import { Filter, ObjectId } from 'mongodb';
+import { ClientSession, Filter, ObjectId } from 'mongodb';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceScopedRepository } from '../database/workspace-scoped.repository';
 import { conditionalUpdate } from '../common/mongo/conditional-update';
@@ -32,7 +32,7 @@ export class ProjectsRepository extends WorkspaceScopedRepository<ProjectDocumen
     return this.findScoped(workspaceId, filter, { sort: { createdAt: -1 } });
   }
 
-  async create(project: NewProject) {
+  async create(project: NewProject, session?: ClientSession) {
     const now = new Date();
     const toInsert: Omit<ProjectDocument, '_id'> = {
       ...project,
@@ -43,7 +43,7 @@ export class ProjectsRepository extends WorkspaceScopedRepository<ProjectDocumen
       updatedAt: now,
     };
     try {
-      const result = await this.collection.insertOne(toInsert);
+      const result = await this.collection.insertOne(toInsert, { session });
       return { ...toInsert, _id: result.insertedId };
     } catch (error) {
       if (isDuplicateKeyError(error)) {
@@ -63,12 +63,14 @@ export class ProjectsRepository extends WorkspaceScopedRepository<ProjectDocumen
     patch: Partial<
       Pick<ProjectDocument, 'name' | 'description' | 'ownerId' | 'teamId' | 'startDate' | 'endDate'>
     >,
+    session?: ClientSession,
   ) {
     return conditionalUpdate(
       this.collection,
       { _id: new ObjectId(projectId), workspaceId, archivedAt: null },
       expectedVersion,
       { $set: patch },
+      session,
     );
   }
 

@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
-import { Filter } from 'mongodb';
+import { ClientSession, Filter } from 'mongodb';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceScopedRepository } from '../database/workspace-scoped.repository';
 import { ErrorCode } from '../common/errors/error-codes';
@@ -32,13 +32,16 @@ export class MembershipsRepository extends WorkspaceScopedRepository<MembershipD
 
   /** Adds a member, or reactivates a previously-removed membership
    * (see membership.schema.ts for why removal is soft-delete). */
-  async addMember(workspaceId: string, teamId: string, userId: string, role: TeamRole) {
+  async addMember(workspaceId: string, teamId: string, userId: string, role: TeamRole, session?: ClientSession) {
     const now = new Date();
-    const existing = await this.collection.findOne({
-      workspaceId,
-      teamId,
-      userId,
-    } as Filter<MembershipDocument>);
+    const existing = await this.collection.findOne(
+      {
+        workspaceId,
+        teamId,
+        userId,
+      } as Filter<MembershipDocument>,
+      { session },
+    );
 
     if (existing && existing.removedAt === null) {
       throw new ConflictException({
@@ -51,7 +54,7 @@ export class MembershipsRepository extends WorkspaceScopedRepository<MembershipD
       const result = await this.collection.findOneAndUpdate(
         { _id: existing._id },
         { $set: { role, removedAt: null, updatedAt: now } },
-        { returnDocument: 'after' },
+        { returnDocument: 'after', session },
       );
       return result!;
     }
@@ -65,7 +68,7 @@ export class MembershipsRepository extends WorkspaceScopedRepository<MembershipD
       createdAt: now,
       updatedAt: now,
     };
-    const insertResult = await this.collection.insertOne(toInsert);
+    const insertResult = await this.collection.insertOne(toInsert, { session });
     return { ...toInsert, _id: insertResult.insertedId };
   }
 

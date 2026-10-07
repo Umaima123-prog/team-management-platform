@@ -1,5 +1,5 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
-import { Collection, Document, Filter, UpdateFilter, WithId } from 'mongodb';
+import { ClientSession, Collection, Document, Filter, UpdateFilter, WithId } from 'mongodb';
 import { ErrorCode } from '../errors/error-codes';
 
 interface Versioned {
@@ -26,6 +26,7 @@ export async function conditionalUpdate<T extends Document & Versioned>(
   filter: Filter<T>,
   expectedVersion: number,
   update: UpdateFilter<T>,
+  session?: ClientSession,
 ): Promise<WithId<T>> {
   const versionedFilter = { ...filter, version: expectedVersion } as Filter<T>;
   const fullUpdate = {
@@ -36,10 +37,11 @@ export async function conditionalUpdate<T extends Document & Versioned>(
 
   const result = await collection.findOneAndUpdate(versionedFilter, fullUpdate, {
     returnDocument: 'after',
+    session,
   });
   if (result) return result;
 
-  const existing = await collection.findOne(filter);
+  const existing = await collection.findOne(filter, { session });
   if (!existing) {
     throw new NotFoundException({ code: ErrorCode.NOT_FOUND, message: 'Resource not found.' });
   }

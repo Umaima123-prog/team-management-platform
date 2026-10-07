@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { randomUUID } from 'crypto';
 import { Request } from 'express';
 import { ObjectId } from 'mongodb';
 import { DatabaseService } from '../../database/database.service';
@@ -14,6 +15,7 @@ interface UserDocument {
 
 interface RequestWithContext extends Request {
   context?: RequestContext;
+  correlationId?: string;
 }
 
 const DEV_USER_HEADER = 'x-dev-user-id';
@@ -68,7 +70,14 @@ export class RequestContextGuard implements CanActivate {
       });
     }
 
-    request.context = { userId: user._id.toHexString(), workspaceId: user.workspaceId };
+    request.context = {
+      userId: user._id.toHexString(),
+      workspaceId: user.workspaceId,
+      // CorrelationIdMiddleware runs before every guard and always sets
+      // this - the fallback only guards against a misconfigured test
+      // harness that bypasses the middleware chain.
+      correlationId: request.correlationId ?? randomUUID(),
+    };
     return true;
   }
 }

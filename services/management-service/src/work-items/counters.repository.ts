@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ClientSession } from 'mongodb';
 import { DatabaseService } from '../database/database.service';
 import { CounterDocument } from './counter.schema';
 
@@ -18,11 +19,11 @@ export class CountersRepository {
     this.collection = databaseService.getCollection<CounterDocument>('counters');
   }
 
-  async getNextSequence(workspaceId: string, projectId: string): Promise<number> {
+  async getNextSequence(workspaceId: string, projectId: string, session?: ClientSession): Promise<number> {
     const result = await this.collection.findOneAndUpdate(
       { _id: projectId },
       { $inc: { seq: 1 }, $setOnInsert: { workspaceId } },
-      { upsert: true, returnDocument: 'after' },
+      { upsert: true, returnDocument: 'after', session },
     );
     return result!.seq;
   }

@@ -79,4 +79,23 @@ export const INDEX_REGISTRY: CollectionIndexSpec[] = [
       { key: { title: 'text', description: 'text' }, name: 'title_description_text_idx' },
     ],
   },
+  {
+    // The transactional outbox (Phase 4) - see docs/ARCHITECTURE.md
+    // "Transactional outbox" and src/messaging/outbox/.
+    collection: 'outbox_events',
+    indexes: [
+      // "unique eventId" - the assignment-required dedup/uniqueness
+      // guarantee for the outbox's own primary business key (distinct
+      // from the Mongo _id).
+      { key: { eventId: 1 }, name: 'event_id_unique', unique: true },
+      // "efficient unpublished-event lookup using publishedAt / retry
+      // fields" - serves OutboxRelayService.claimBatch's equality
+      // filter (publishedAt: null, failedAt: null) and its
+      // `sort: { occurredAt: 1 }` directly from the index.
+      {
+        key: { publishedAt: 1, failedAt: 1, occurredAt: 1 },
+        name: 'unpublished_lookup_idx',
+      },
+    ],
+  },
 ];

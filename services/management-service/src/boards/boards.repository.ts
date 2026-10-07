@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { ObjectId } from 'mongodb';
+import { ClientSession, ObjectId } from 'mongodb';
 import { randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceScopedRepository } from '../database/workspace-scoped.repository';
@@ -23,7 +23,7 @@ export class BoardsRepository extends WorkspaceScopedRepository<BoardDocument> {
   /** One board per project, created with the Jira-like default columns
    * (docs/ARCHITECTURE.md). There is no API to add/remove/reorder
    * columns in Phase 3 - only to create a project's initial board. */
-  async createDefaultBoard(workspaceId: string, projectId: string) {
+  async createDefaultBoard(workspaceId: string, projectId: string, session?: ClientSession) {
     const now = new Date();
     const toInsert: Omit<BoardDocument, '_id'> = {
       workspaceId,
@@ -38,7 +38,7 @@ export class BoardsRepository extends WorkspaceScopedRepository<BoardDocument> {
       createdAt: now,
       updatedAt: now,
     };
-    const result = await this.collection.insertOne(toInsert);
+    const result = await this.collection.insertOne(toInsert, { session });
     return { ...toInsert, _id: result.insertedId };
   }
 }

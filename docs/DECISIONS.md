@@ -222,3 +222,217 @@ enforced regardless of who's asking.
 **Rules out:** assuming project/work-item endpoints are
 role-restricted - they are not, in Phase 3. A future phase that wants
 that must add it explicitly, the same way team mutations do it today.
+
+## 11. Atlas transaction verification: structural evidence, now confirmed by a live run (Phase 4)
+
+**Decision:** Use real `session.withTransaction()` MongoDB transactions
+for every authoritative-mutation-plus-outbox-row write
+(`DatabaseService.withTransaction`), based on independently-gathered
+evidence that the configured Atlas deployment is a multi-node replica
+set, rather than live-executing a transaction against it in this
+session.
+
+**Why:** The assignment requires verifying transaction support rather
+than assuming it. A direct live-transaction probe was attempted first
+(a throwaway script against the real `.env`, cleaning up only its own
+probe documents) but could not complete: `openssl s_client` to the
+Atlas host failed with `SSL alert number 80` ("internal error")
+immediately after the TLS ClientHello, on all three resolved replica
+members, while a raw TCP connection to the same host:27017 succeeded
+and general HTTPS (port 443) egress worked fine from the same
+environment. This reproduces independent of Node (the same failure
+happens with plain `openssl`), which rules out a driver bug and points
+at a local network/security-product TLS interception specific to
+MongoDB's non-HTTP wire protocol on 27017 - not an Atlas-side
+rejection (Atlas access-list rejections don't manifest as a mid-
+handshake TLS alert) and not evidence against transaction support.
+Independently, live DNS SRV resolution against Atlas's real
+infrastructure (`_mongodb._tcp.<cluster>.mongodb.net`) returned three
+`shard-00-0{0,1,2}` hosts - Atlas's standard replica-set member naming,
+and Atlas has not offered non-replica-set (standalone) deployments for
+years; `docs/ARCHITECTURE.md` already documents this deployment as the
+free **M0** tier, which Atlas always deploys as a 3-node replica set.
+Replica sets support multi-document ACID transactions since MongoDB
+4.0. Given solid structural evidence of a replica-set topology and no
+contrary evidence, real transactions are the correct implementation -
+not a fallback.
+
+**Rules out:** silently downgrading to non-transactional writes or an
+application-level "best effort" pseudo-transaction instead of
+reporting a limitation; treating the TLS failure as evidence Atlas
+lacks transaction support (it is an unrelated local connectivity
+issue).
+
+**Live verification update (same day, outside the sandboxed
+environment):** the structural case above was then confirmed directly.
+The user ran `services/management-service` with `npm run start:dev`
+against the real `.env` in a normal terminal (not subject to the
+sandbox's network restriction - see the firewall-rule finding in this
+session's history) and executed `phase4-live-verify.js` (see Phase 4a
+TIMELOG notes). Result: **13/13 checks passed**, including the
+atomicity check this decision's "next safe step" asked for -
+`POST /api/teams` created a real team document in live Atlas
+`management_db` and its matching `tm.v1.team.created` row in
+`outbox_events`, cross-referenced by identical `aggregateId`/`version`/
+`workspaceId` and near-zero `createdAt` delta (the two writes land
+together or not at all, by construction - `DatabaseService.withTransaction`
+wraps both in one session). The relay then claimed and published that
+row to the real local `TEAM_EVENTS` stream (JetStream sequence 44),
+confirmed independently two ways: the relay's own structured log line
+(`"result":"published","streamSeq":44`) and the verification script's
+separate read of the message back out of the stream via a throwaway
+ephemeral consumer - both report the same sequence number, which is
+only possible if a genuine `PubAck` was received and the message is
+really stored. `publishedAt` was confirmed set only after that
+sequence existed. This is now a fully live-confirmed guarantee, not
+only a structural inference - see `docs/TIMELOG.md` Phase 4a/4c notes
+for the full run.
+
+## 12. causationId chains multiple facts from one command; most events are command-root facts (Phase 4)
+
+**Decision:** When a single HTTP command produces more than one
+domain event (today: only `POST /api/projects`, which emits
+`project.created`, `project.team_assigned`, and `board.created`), the
+first event enqueued is the root fact (`causationId: null`) and the
+others set `causationId` to that root event's `eventId`. Every other
+command that produces exactly one event sets `causationId: null` -
+there is no synthetic "command id" distinct from `correlationId`.
+
+**Why:** The assignment's canonical envelope names `causationId` as
+"the event that caused this one" (chained effects), which only has
+meaning when more than one event exists per command. Inventing a
+separate command-id concept to populate `causationId` on every
+single-event command would duplicate what `correlationId` already
+captures (the originating request) without adding information.
+Chaining it for the one real multi-event command makes "these three
+facts happened together, this one first" explicit and queryable rather
+than left to timestamp-ordering inference.
+
+**Rules out:** a `causationId` that's always null (would waste the
+field entirely); a `causationId` that duplicates `correlationId`'s
+job.
+
+## 13. GET /health/ready is gated on MongoDB only; NATS/messaging is a reported diagnostic (Phase 4)
+
+**Decision:** `GET /health/ready`'s 200/503 status depends solely on
+`DatabaseService.ping()` (unchanged from Phase 2/3). NATS connectivity,
+JetStream bootstrap state, and outbox backlog/failure counts are
+included in the response body (`messaging: {...}`) but never flip the
+HTTP status.
+
+**Why:** The assignment's health-model bullet says readiness "checks
+NATS connectivity and the service's owned database," which read
+literally could mean gating on both. Doing so would be the wrong call
+for *this* architecture specifically: the whole point of the
+transactional outbox is that a write command's durability and the
+HTTP caller's success response do not depend on NATS being reachable
+at that moment - the relay catches up later. Making `/health/ready`
+503 whenever NATS blips would cause an orchestrator to pull a perfectly
+functional instance (one that can still accept and durably record
+every command) out of rotation for a condition the architecture is
+explicitly designed to tolerate. Reporting NATS/outbox state as a
+diagnostic satisfies "readiness exposes messaging state" without
+re-coupling write availability to messaging availability.
+
+**Rules out:** a future change that makes `/health/ready` 503 on NATS
+being down without first re-litigating this trade-off; treating the
+`messaging` block's absence of hard-gating as "NATS health isn't
+checked" - it is checked and reported, just not used to reject
+traffic.
+
+## 14. `project.team_assigned` is reused on update, not limited to creation-time (Phase 4)
+
+**Decision:** The documented `project.team_assigned` subject is
+emitted both when `POST /api/projects` creates a project (with
+`previousTeamId: null`) and whenever `PATCH /api/projects/:id` changes
+an existing project's `teamId` (with the real previous value).
+
+**Why:** The assignment's Minimum API surface table only explicitly
+names this event at creation time ("Create project, assign team...
+emit facts"), but the subject itself names the fact "a project's
+owning team was assigned," which is equally true on a later
+reassignment - and TM-04 ("assign one owning team to a project...")
+isn't scoped to creation only. Reusing the existing documented subject
+for both cases is a narrow, justified extension of when a subject
+fires, not a new subject - the assignment says not to invent subjects,
+not that each one may only fire once.
+
+**Rules out:** a new `project.team_reassigned` subject; a PATCH that
+silently changes `teamId` with no event at all.
+
+## 15. NATS client library: `nats` v2, not the newer `@nats-io/*` package split (Phase 4)
+
+**Decision:** Use `nats@2.29.3` (the single-package client) for all
+Core NATS and JetStream access, despite npm's deprecation notice
+pointing at `@nats-io/transport-node` (with JetStream now a separate
+`@nats-io/jetstream` package).
+
+**Why:** The newer split is a package *restructuring*, not a security
+deprecation - `nats@2.29.3` has zero known vulnerabilities
+(`npm audit --omit=dev`) and is what NestJS's own official NATS
+transporter documentation (an assignment-cited reference) still builds
+against. Migrating to a multi-package API with a materially different
+JetStream surface carries real integration risk under this exercise's
+timebox for no functional benefit - every capability this project
+needs (Core request/reply, JetStream publish/manage/consume, headers,
+`msgID` dedup) is present and documented in the version used.
+
+**Rules out:** treating the npm deprecation warning as a security
+issue requiring an immediate migration; silently upgrading without
+re-verifying the entire messaging layer against the new API's
+different consumer/manager shapes.
+
+## 16. MongoClient self-healing reconnect, not a new client per operation (Phase 4)
+
+**Decision:** `DatabaseService.ensureConnected()` calls `this.client.connect()`
+(idempotent, lock-guarded, near-instant no-op once already connected)
+before `ping()`'s `db.command({ping:1})` and before every
+`withTransaction()`; `OutboxRelayService.tick()` calls it before each
+tick's `claimBatch()`. `database.providers.ts`'s `serverSelectionTimeoutMS`
+was raised from 2s to 10s. The app's single `MongoClient` instance
+(DI singleton, `DatabaseModule`) is never replaced or duplicated - the
+same object is repaired in place, forever.
+
+**Why:** Reproduced live, outside the sandbox, against real Atlas: the
+relay logged `MongoTopologyClosedError: Topology is closed` on every
+tick, and `GET /health/ready` failed identically and simultaneously -
+both symptoms traced to one root cause. Reading the installed MongoDB
+Node.js driver's own source (`node_modules/mongodb/lib/sdam/topology.js`,
+`Topology.connect()`) confirmed: if a `MongoClient`'s *first* connection
+attempt fails for any reason (a transient Atlas blip, an M0 free-tier
+cluster waking from idle, a too-short timeout), the driver's internal
+`Topology` catches that error and calls `this.close()` **on itself**
+before rethrowing - permanently closing the topology. Nothing in this
+app explicitly called `.close()` anywhere except `DatabaseModule`'s own
+shutdown hook (confirmed by grepping the whole `src/` tree for
+`.close(`/`enableShutdownHooks` - only one call site existed, and
+`enableShutdownHooks()` was never wired to begin with, so it could not
+have fired during normal operation). Every operation afterward reused
+the same dead topology and failed identically forever - a full process
+restart was the only prior recovery path. `MongoClient.connect()`
+(the *public*, client-level method - `mongo_client.js`'s `_connect()`)
+is different: its only short-circuit is `if (this.topology?.isConnected())
+return`; otherwise it builds a **fresh internal `Topology` in place on
+the same client object** and reconnects. Because every repository's
+`Collection`/`Db` reference delegates to the shared client at call
+time rather than holding a frozen topology snapshot, repairing the
+client this way transparently heals every already-constructed
+repository too - no DI graph changes, no new `MongoClient`, exactly
+one shared long-lived connection for the app's life, satisfying
+"never create a new client per relay tick" while still genuinely
+recovering.
+
+`app.enableShutdownHooks()` was also added to `main.ts` (previously
+absent) so the existing single `client.close()` in `DatabaseModule`'s
+`onApplicationShutdown` actually runs - exactly once, only on a real
+SIGINT/SIGTERM/`app.close()` - instead of never running at all.
+
+**Rules out:** constructing a new `MongoClient` per operation/tick (a
+real anti-pattern that would exhaust connections and defeat pooling);
+retrying individual failed operations without first repairing the
+topology (would keep failing identically); treating this as an Atlas-
+side or network problem to "just wait out" (the topology does not
+self-heal on its own - the app must call `.connect()` again); claiming
+a transient Atlas blip is now impossible (it isn't - the fix is that
+it's now *recoverable within seconds* via the next tick/ping, not
+fatal for the process's remaining lifetime).

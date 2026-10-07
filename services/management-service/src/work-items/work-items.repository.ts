@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Filter, ObjectId } from 'mongodb';
+import { ClientSession, Filter, ObjectId } from 'mongodb';
 import { DatabaseService } from '../database/database.service';
 import { WorkspaceScopedRepository } from '../database/workspace-scoped.repository';
 import { conditionalUpdate } from '../common/mongo/conditional-update';
@@ -48,7 +48,7 @@ export class WorkItemsRepository extends WorkspaceScopedRepository<WorkItemDocum
     return this.findOneScoped(workspaceId, { _id: new ObjectId(itemId) });
   }
 
-  async create(item: NewWorkItem) {
+  async create(item: NewWorkItem, session?: ClientSession) {
     const now = new Date();
     const toInsert: Omit<WorkItemDocument, '_id'> = {
       ...item,
@@ -57,7 +57,7 @@ export class WorkItemsRepository extends WorkspaceScopedRepository<WorkItemDocum
       createdAt: now,
       updatedAt: now,
     };
-    const result = await this.collection.insertOne(toInsert);
+    const result = await this.collection.insertOne(toInsert, { session });
     return { ...toInsert, _id: result.insertedId };
   }
 
@@ -71,21 +71,30 @@ export class WorkItemsRepository extends WorkspaceScopedRepository<WorkItemDocum
         'title' | 'description' | 'type' | 'priority' | 'labels' | 'dueDate' | 'acceptanceNotes'
       >
     >,
+    session?: ClientSession,
   ) {
     return conditionalUpdate(
       this.collection,
       { _id: new ObjectId(itemId), workspaceId, archivedAt: null },
       expectedVersion,
       { $set: patch },
+      session,
     );
   }
 
-  assign(workspaceId: string, itemId: string, expectedVersion: number, assigneeId: string | null) {
+  assign(
+    workspaceId: string,
+    itemId: string,
+    expectedVersion: number,
+    assigneeId: string | null,
+    session?: ClientSession,
+  ) {
     return conditionalUpdate(
       this.collection,
       { _id: new ObjectId(itemId), workspaceId, archivedAt: null },
       expectedVersion,
       { $set: { assigneeId } },
+      session,
     );
   }
 
@@ -95,21 +104,24 @@ export class WorkItemsRepository extends WorkspaceScopedRepository<WorkItemDocum
     expectedVersion: number,
     columnId: string,
     rank: number,
+    session?: ClientSession,
   ) {
     return conditionalUpdate(
       this.collection,
       { _id: new ObjectId(itemId), workspaceId, archivedAt: null },
       expectedVersion,
       { $set: { columnId, rank } },
+      session,
     );
   }
 
-  archive(workspaceId: string, itemId: string, expectedVersion: number) {
+  archive(workspaceId: string, itemId: string, expectedVersion: number, session?: ClientSession) {
     return conditionalUpdate(
       this.collection,
       { _id: new ObjectId(itemId), workspaceId, archivedAt: null },
       expectedVersion,
       { $set: { archivedAt: new Date() } },
+      session,
     );
   }
 

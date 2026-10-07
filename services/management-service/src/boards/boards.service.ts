@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { ClientSession } from 'mongodb';
 import { ErrorCode } from '../common/errors/error-codes';
 import { BoardsRepository } from './boards.repository';
 
@@ -6,8 +7,8 @@ import { BoardsRepository } from './boards.repository';
 export class BoardsService {
   constructor(private readonly boardsRepository: BoardsRepository) {}
 
-  createDefaultBoard(workspaceId: string, projectId: string) {
-    return this.boardsRepository.createDefaultBoard(workspaceId, projectId);
+  createDefaultBoard(workspaceId: string, projectId: string, session?: ClientSession) {
+    return this.boardsRepository.createDefaultBoard(workspaceId, projectId, session);
   }
 
   async getByProjectId(workspaceId: string, projectId: string) {

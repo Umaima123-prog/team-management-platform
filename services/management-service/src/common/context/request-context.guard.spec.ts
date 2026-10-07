@@ -5,7 +5,12 @@ import { DatabaseService } from '../../database/database.service';
 import { RequestContextGuard } from './request-context.guard';
 
 function contextWith(headers: Record<string, string>) {
-  const request: { headers: Record<string, string>; context?: unknown } = { headers };
+  // CorrelationIdMiddleware always runs before this guard in the real
+  // request pipeline and sets this - see correlation-id.middleware.ts.
+  const request: { headers: Record<string, string>; context?: unknown; correlationId?: string } = {
+    headers,
+    correlationId: 'test-correlation-id',
+  };
   const ctx = {
     switchToHttp: () => ({ getRequest: () => request }),
     getHandler: () => undefined,
@@ -69,6 +74,7 @@ describe('RequestContextGuard', () => {
     expect(request.context).toEqual({
       userId: userId.toHexString(),
       workspaceId: 'real-workspace',
+      correlationId: 'test-correlation-id',
     });
   });
 });

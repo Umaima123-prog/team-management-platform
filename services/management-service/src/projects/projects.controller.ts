@@ -2,6 +2,8 @@ import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common
 import { CurrentContext } from '../common/context/current-context.decorator';
 import { RequestContext } from '../common/context/request-context';
 import { withId } from '../common/mongo/with-id.util';
+import { InsightsClientService } from '../messaging/insights/insights-client.service';
+import { InsightsQueryOutcome } from '../messaging/insights/insights.types';
 import { ArchiveProjectDto } from './dto/archive-project.dto';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
@@ -9,11 +11,14 @@ import { ProjectsService } from './projects.service';
 
 @Controller('api/projects')
 export class ProjectsController {
-  constructor(private readonly projectsService: ProjectsService) {}
+  constructor(
+    private readonly projectsService: ProjectsService,
+    private readonly insightsClient: InsightsClientService,
+  ) {}
 
   @Post()
   async create(@CurrentContext() ctx: RequestContext, @Body() dto: CreateProjectDto) {
-    const project = await this.projectsService.createProject(ctx.workspaceId, dto);
+    const project = await this.projectsService.createProject(ctx.workspaceId, dto, ctx.userId, ctx.correlationId);
     return withId(project);
   }
 
@@ -41,7 +46,13 @@ export class ProjectsController {
     @Param('projectId') projectId: string,
     @Body() dto: UpdateProjectDto,
   ) {
-    const project = await this.projectsService.updateProject(ctx.workspaceId, projectId, dto);
+    const project = await this.projectsService.updateProject(
+      ctx.workspaceId,
+      projectId,
+      dto,
+      ctx.userId,
+      ctx.correlationId,
+    );
     return withId(project);
   }
 
@@ -57,5 +68,21 @@ export class ProjectsController {
       dto.expectedVersion,
     );
     return withId(project);
+  }
+
+  /**
+   * Synchronous insight query over Core NATS request/reply (assignment
+   * section 9 "GET /api/projects/{projectId}/insights ... with timeout
+   * and graceful fallback"). Always 200 - "pending"/"unavailable" are
+   * legitimate, typed states (TM-12), not server errors; only an
+   * unknown projectId is a 404.
+   */
+  @Get(':projectId/insights')
+  async insights(
+    @CurrentContext() ctx: RequestContext,
+    @Param('projectId') projectId: string,
+  ): Promise<InsightsQueryOutcome> {
+    await this.projectsService.getProjectOrThrow(ctx.workspaceId, projectId);
+    return this.insightsClient.getProjectInsights(projectId, ctx.workspaceId, ctx.correlationId);
   }
 }

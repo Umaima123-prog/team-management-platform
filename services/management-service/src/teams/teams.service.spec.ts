@@ -1,4 +1,7 @@
 import { ConflictException, ForbiddenException } from '@nestjs/common';
+import { ClientSession } from 'mongodb';
+import { DatabaseService } from '../database/database.service';
+import { OutboxService } from '../messaging/outbox/outbox.service';
 import { UsersRepository } from '../identity/users.repository';
 import { MembershipsRepository } from './memberships.repository';
 import { TeamsRepository } from './teams.repository';
@@ -20,11 +23,15 @@ describe('TeamsService', () => {
     remove: jest.Mock;
   };
   let usersRepository: { assertBelongsToWorkspace: jest.Mock };
+  let databaseService: { withTransaction: jest.Mock };
+  let outboxService: { enqueue: jest.Mock };
   let service: TeamsService;
 
   const WORKSPACE = 'ws-1';
   const TEAM_ID = 'team-1';
   const REQUESTER = 'user-1';
+  const CORRELATION_ID = 'corr-1';
+  const FAKE_SESSION = {} as ClientSession;
 
   beforeEach(() => {
     teamsRepository = {
@@ -42,39 +49,88 @@ describe('TeamsService', () => {
       remove: jest.fn(),
     };
     usersRepository = { assertBelongsToWorkspace: jest.fn() };
+    // Mimics DatabaseService.withTransaction: runs fn against a fake
+    // session and returns fn's result - same shape real callers get.
+    databaseService = {
+      withTransaction: jest.fn(async (fn: (session: ClientSession) => Promise<unknown>) => fn(FAKE_SESSION)),
+    };
+    outboxService = { enqueue: jest.fn().mockResolvedValue(undefined) };
     service = new TeamsService(
       teamsRepository as unknown as TeamsRepository,
       membershipsRepository as unknown as MembershipsRepository,
       usersRepository as unknown as UsersRepository,
+      databaseService as unknown as DatabaseService,
+      outboxService as unknown as OutboxService,
     );
   });
 
   describe('createTeam', () => {
-    it('creates the team and makes the creator its first OWNER', async () => {
+    it('creates the team and makes the creator its first OWNER, inside one transaction', async () => {
       const team = {
         _id: { toHexString: () => TEAM_ID },
         code: 'PAY',
+        name: 'Payments',
         workspaceId: WORKSPACE,
         version: 1,
       };
       teamsRepository.create.mockResolvedValue(team);
 
-      const result = await service.createTeam(WORKSPACE, REQUESTER, {
-        code: 'PAY',
-        name: 'Payments',
-      });
+      const result = await service.createTeam(
+        WORKSPACE,
+        REQUESTER,
+        { code: 'PAY', name: 'Payments' },
+        CORRELATION_ID,
+      );
 
       expect(result).toBe(team);
-      expect(membershipsRepository.addMember).toHaveBeenCalledWith(WORKSPACE, TEAM_ID, REQUESTER, 'OWNER');
+      expect(databaseService.withTransaction).toHaveBeenCalledTimes(1);
+      expect(teamsRepository.create).toHaveBeenCalledWith(
+        { workspaceId: WORKSPACE, code: 'PAY', name: 'Payments', description: null },
+        FAKE_SESSION,
+      );
+      expect(membershipsRepository.addMember).toHaveBeenCalledWith(
+        WORKSPACE,
+        TEAM_ID,
+        REQUESTER,
+        'OWNER',
+        FAKE_SESSION,
+      );
     });
 
-    it('propagates a duplicate-code conflict from the repository unchanged', async () => {
+    it('enqueues exactly one team.created outbox fact with the committed aggregate version', async () => {
+      const team = {
+        _id: { toHexString: () => TEAM_ID },
+        code: 'PAY',
+        name: 'Payments',
+        workspaceId: WORKSPACE,
+        version: 1,
+      };
+      teamsRepository.create.mockResolvedValue(team);
+
+      await service.createTeam(WORKSPACE, REQUESTER, { code: 'PAY', name: 'Payments' }, CORRELATION_ID);
+
+      expect(outboxService.enqueue).toHaveBeenCalledTimes(1);
+      expect(outboxService.enqueue).toHaveBeenCalledWith(FAKE_SESSION, {
+        workspaceId: WORKSPACE,
+        eventType: 'team.created',
+        aggregateType: 'Team',
+        aggregateId: TEAM_ID,
+        aggregateVersion: 1,
+        correlationId: CORRELATION_ID,
+        causationId: null,
+        actorId: REQUESTER,
+        payload: { code: 'PAY', name: 'Payments' },
+      });
+    });
+
+    it('propagates a duplicate-code conflict from the repository and creates no outbox event', async () => {
       teamsRepository.create.mockRejectedValue(new ConflictException('dup'));
 
       await expect(
-        service.createTeam(WORKSPACE, REQUESTER, { code: 'PAY', name: 'Payments' }),
+        service.createTeam(WORKSPACE, REQUESTER, { code: 'PAY', name: 'Payments' }, CORRELATION_ID),
       ).rejects.toThrow(ConflictException);
       expect(membershipsRepository.addMember).not.toHaveBeenCalled();
+      expect(outboxService.enqueue).not.toHaveBeenCalled();
     });
   });
 
@@ -118,8 +174,9 @@ describe('TeamsService', () => {
       membershipsRepository.findActive.mockResolvedValue(null);
 
       await expect(
-        service.addMember(WORKSPACE, TEAM_ID, REQUESTER, { userId: 'u2', role: 'MEMBER' }),
+        service.addMember(WORKSPACE, TEAM_ID, REQUESTER, { userId: 'u2', role: 'MEMBER' }, CORRELATION_ID),
       ).rejects.toThrow(ForbiddenException);
+      expect(outboxService.enqueue).not.toHaveBeenCalled();
     });
 
     it('only an OWNER (not a LEAD) may archive the team', async () => {
@@ -141,33 +198,66 @@ describe('TeamsService', () => {
   });
 
   describe('addMember', () => {
-    const team = { _id: TEAM_ID, workspaceId: WORKSPACE, archivedAt: null, version: 1 };
+    const team = { _id: TEAM_ID, workspaceId: WORKSPACE, archivedAt: null, version: 3 };
 
     beforeEach(() => {
       teamsRepository.findById.mockResolvedValue(team);
       membershipsRepository.findActive.mockResolvedValue({ role: 'OWNER' });
     });
 
-    it('validates the target user belongs to the same workspace before adding', async () => {
+    it('validates the target user belongs to the same workspace before adding, and never opens a transaction', async () => {
       usersRepository.assertBelongsToWorkspace.mockRejectedValue(new Error('cross-workspace'));
 
       await expect(
-        service.addMember(WORKSPACE, TEAM_ID, REQUESTER, { userId: 'other-ws-user', role: 'MEMBER' }),
+        service.addMember(
+          WORKSPACE,
+          TEAM_ID,
+          REQUESTER,
+          { userId: 'other-ws-user', role: 'MEMBER' },
+          CORRELATION_ID,
+        ),
       ).rejects.toThrow();
       expect(membershipsRepository.addMember).not.toHaveBeenCalled();
+      expect(databaseService.withTransaction).not.toHaveBeenCalled();
+      expect(outboxService.enqueue).not.toHaveBeenCalled();
     });
 
-    it('adds the member once validation passes', async () => {
+    it('adds the member and enqueues exactly one team.member_added fact once validation passes', async () => {
       usersRepository.assertBelongsToWorkspace.mockResolvedValue(undefined);
       const membership = { teamId: TEAM_ID, userId: 'u2', role: 'MEMBER' };
       membershipsRepository.addMember.mockResolvedValue(membership);
 
-      const result = await service.addMember(WORKSPACE, TEAM_ID, REQUESTER, {
-        userId: 'u2',
-        role: 'MEMBER',
-      });
+      const result = await service.addMember(
+        WORKSPACE,
+        TEAM_ID,
+        REQUESTER,
+        { userId: 'u2', role: 'MEMBER' },
+        CORRELATION_ID,
+      );
 
       expect(result).toBe(membership);
+      expect(outboxService.enqueue).toHaveBeenCalledTimes(1);
+      expect(outboxService.enqueue).toHaveBeenCalledWith(FAKE_SESSION, {
+        workspaceId: WORKSPACE,
+        eventType: 'team.member_added',
+        aggregateType: 'Team',
+        aggregateId: TEAM_ID,
+        aggregateVersion: 3,
+        correlationId: CORRELATION_ID,
+        causationId: null,
+        actorId: REQUESTER,
+        payload: { userId: 'u2', role: 'MEMBER' },
+      });
+    });
+
+    it('creates no outbox event when the membership insert itself fails (e.g. already an active member)', async () => {
+      usersRepository.assertBelongsToWorkspace.mockResolvedValue(undefined);
+      membershipsRepository.addMember.mockRejectedValue(new ConflictException('already a member'));
+
+      await expect(
+        service.addMember(WORKSPACE, TEAM_ID, REQUESTER, { userId: 'u2', role: 'MEMBER' }, CORRELATION_ID),
+      ).rejects.toThrow(ConflictException);
+      expect(outboxService.enqueue).not.toHaveBeenCalled();
     });
   });
 });

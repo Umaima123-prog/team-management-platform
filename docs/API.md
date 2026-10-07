@@ -1,15 +1,25 @@
-# Management Service API (Phase 3)
+# Management Service API (Phase 4)
 
 Base URL: `http://localhost:3000` (local dev). All routes below return
 JSON. All routes except `GET /health` and `GET /health/ready` require
 the `X-Dev-User-Id` header - see
 [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) ("Request context / trust
 model") for why, and the management-service README for how to get a
-real user id via `npm run seed`.
+real user id via `npm run seed`. Every request/response also carries
+`X-Correlation-Id` (accepted if you supply a valid one, generated
+otherwise) - see "Correlation / observability" in `ARCHITECTURE.md`.
 
-This document describes **only what is implemented in Phase 3**:
-teams, memberships, projects, boards, work items. There is no
-event publishing, no outbox, and no admin UI yet.
+This document describes **Phase 3's REST surface (teams, memberships,
+projects, boards, work items) plus Phase 4's messaging additions**
+(the `GET /api/projects/:projectId/insights` query endpoint and
+extended `GET /health/ready` diagnostics). Each mutating endpoint below
+now also durably records the documented domain fact in the
+transactional outbox for asynchronous publication - see
+[`docs/EVENT_CATALOG.md`](EVENT_CATALOG.md) for exactly which endpoint
+emits which event. There is no admin UI yet, and no Python-side
+projection/insights data yet (Phase 5) - the insights endpoint always
+returns a typed `pending`/`unavailable`/`not_ready` response until a
+real responder exists.
 
 ## Error envelope
 
@@ -48,6 +58,30 @@ GET /api/projects/:projectId/items?limit=25&cursor=<opaque>
 Response: `{ "items": [...], "nextCursor": "<opaque>" | null }`. Pass
 `nextCursor` back as `cursor` to get the next page; `null` means
 there is no more data.
+
+## Health
+
+### `GET /health`
+
+Liveness only - never touches MongoDB or NATS: `{ "status": "ok", "service": "management-service" }`.
+
+### `GET /health/ready`
+
+200 or 503, gated on MongoDB connectivity only (see
+`docs/DECISIONS.md` #13 for why NATS doesn't gate this too):
+
+```json
+{
+  "status": "ok",
+  "database": "management_db",
+  "messaging": {
+    "natsConnected": true,
+    "jetstreamReady": true,
+    "unpublishedOutboxCount": 0,
+    "failedOutboxCount": 0
+  }
+}
+```
 
 ---
 
@@ -130,6 +164,34 @@ Changing `ownerId`/`teamId` re-validates the same-workspace/not-archived rules.
 ### `POST /api/projects/:projectId/archive`
 
 Body: `{ "expectedVersion": 1 }`.
+
+### `GET /api/projects/:projectId/insights` (Phase 4)
+
+Synchronous project insights, backed by Core NATS request/reply to the
+Activity & Insights Service (not implemented yet - Phase 5). 404 if
+the project doesn't exist in this workspace; otherwise always **200**
+with a typed `status`:
+
+```json
+// status: "ok" (once a real Python responder exists)
+{ "status": "ok", "data": { "projectId": "...", "generatedAt": "...", "workloadByAssignee": [...], "countsByStatus": [...], "lastProcessedSequence": 42 } }
+```
+```json
+// status: "not_ready" - responder exists but projection isn't caught up yet
+{ "status": "not_ready", "reason": "..." }
+```
+```json
+// status: "pending" - responder is subscribed but didn't reply within INSIGHTS_QUERY_TIMEOUT_MS
+{ "status": "pending", "reason": "TIMEOUT" }
+```
+```json
+// status: "unavailable" - nothing is listening on the query subject (today's state - Phase 5 responder doesn't exist yet), or NATS itself is unreachable, or the reply was malformed
+{ "status": "unavailable", "reason": "NO_RESPONDER" }
+```
+
+Never blocks indefinitely (bounded by `INSIGHTS_QUERY_TIMEOUT_MS`,
+default 2000ms) and never 500s for these states - see
+`docs/ARCHITECTURE.md` "Core NATS request/reply" and TM-12.
 
 ---
 

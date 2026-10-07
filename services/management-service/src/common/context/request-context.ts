@@ -7,4 +7,8 @@
 export interface RequestContext {
   userId: string;
   workspaceId: string;
+  /** Set by CorrelationIdMiddleware before this guard runs - propagated
+   * into outbox rows and NATS headers (see
+   * docs/ARCHITECTURE.md "Correlation / observability"). */
+  correlationId: string;
 }

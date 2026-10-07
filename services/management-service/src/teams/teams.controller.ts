@@ -24,7 +24,7 @@ export class TeamsController {
 
   @Post()
   async create(@CurrentContext() ctx: RequestContext, @Body() dto: CreateTeamDto) {
-    const team = await this.teamsService.createTeam(ctx.workspaceId, ctx.userId, dto);
+    const team = await this.teamsService.createTeam(ctx.workspaceId, ctx.userId, dto, ctx.correlationId);
     return withId(team);
   }
 
@@ -74,7 +74,13 @@ export class TeamsController {
     @Param('teamId') teamId: string,
     @Body() dto: AddMemberDto,
   ) {
-    const membership = await this.teamsService.addMember(ctx.workspaceId, teamId, ctx.userId, dto);
+    const membership = await this.teamsService.addMember(
+      ctx.workspaceId,
+      teamId,
+      ctx.userId,
+      dto,
+      ctx.correlationId,
+    );
     return withId(membership);
   }
 

@@ -59,7 +59,21 @@ connect to MongoDB Atlas via their own `.env` files (see each service's
   per project, Jira-like work items, optimistic concurrency, move/
   reorder, validation/rate-limiting. See
   [`docs/API.md`](docs/API.md) for every route.
+- **Phase 4**: messaging reliability - transactional outbox, real
+  `TEAM_EVENTS` JetStream stream + `activity-insights-v1` durable
+  consumer bootstrap (idempotent, verified against the real local
+  server), a publisher relay (bounded retry/backoff, publish-before-
+  mark, `Nats-Msg-Id` dedup), correlation-id propagation, a Core NATS
+  request/reply insights query endpoint with bounded timeout, and
+  extended health diagnostics. See
+  [`docs/EVENT_CATALOG.md`](docs/EVENT_CATALOG.md) for exactly which
+  command emits which event, and
+  `services/management-service/test/nats-integration.e2e-spec.ts` for
+  the real-NATS integration evidence. Live-verified end to end against
+  real Atlas and real local NATS outside the sandboxed dev environment
+  (13/13 checks) - see [`docs/DECISIONS.md`](docs/DECISIONS.md) #11/#16
+  and [`docs/TIMELOG.md`](docs/TIMELOG.md) Phase 4c.
 
-**Not yet implemented**: JetStream event publishing/consumption, the
-transactional outbox, Python-side projections, and the AdminLTE admin
-UI.
+**Not yet implemented**: the Python-side event consumer/projection
+logic (Phase 5 - the durable consumer is provisioned but nothing
+consumes from it yet) and the AdminLTE admin UI.
