@@ -28,6 +28,7 @@ import logging
 from datetime import UTC, datetime
 
 import nats.errors
+import nats.js.errors
 from nats.js import JetStreamContext
 
 from ..consumer_state import ConsumerStateView
@@ -40,6 +41,18 @@ DEFAULT_FETCH_BATCH = 10
 DEFAULT_FETCH_TIMEOUT_S = 5.0
 DEFAULT_MAX_DELIVER = 5
 IN_PROCESS_RETRY_BACKOFF_S: tuple[float, ...] = (0.2, 1.0)
+
+# Found live in production (Railway): the JetStream API itself can
+# answer a pull fetch with a 503 ("no responders"/service unavailable -
+# nats.js.errors.ServiceUnavailableError), e.g. briefly after the NATS
+# server restarts/redeploys or during a transient broker-side hiccup -
+# distinct from the stream/consumer genuinely not existing (that is
+# nats.js.errors.NotFoundError, a real configuration problem,
+# deliberately left uncaught/fatal below, same as
+# ConnectionClosedError). A 503 is explicitly "come back later," not
+# fatal, so this is retried with capped exponential backoff rather
+# than crashing the process - see run_forever.
+DEFAULT_SERVICE_UNAVAILABLE_BACKOFF_S: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 16.0, 30.0)
 
 
 class EventConsumer:
@@ -55,6 +68,7 @@ class EventConsumer:
         fetch_timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
         max_deliver: int = DEFAULT_MAX_DELIVER,
         in_process_retry_backoff_s: tuple[float, ...] = IN_PROCESS_RETRY_BACKOFF_S,
+        service_unavailable_backoff_s: tuple[float, ...] = DEFAULT_SERVICE_UNAVAILABLE_BACKOFF_S,
     ) -> None:
         self._js = js
         self._processor = processor
@@ -65,6 +79,7 @@ class EventConsumer:
         self._fetch_timeout_s = fetch_timeout_s
         self._max_deliver = max_deliver
         self._in_process_retry_backoff_s = in_process_retry_backoff_s
+        self._service_unavailable_backoff_s = service_unavailable_backoff_s
 
     async def run_forever(self, stop_event: asyncio.Event) -> None:
         sub = await self._js.pull_subscribe_bind(
@@ -76,6 +91,7 @@ class EventConsumer:
             self._durable_name,
             self._stream_name,
         )
+        consecutive_service_unavailable = 0
         try:
             while not stop_event.is_set():
                 try:
@@ -98,11 +114,42 @@ class EventConsumer:
                     # builtin is a superset catch: it also catches
                     # every nats.errors.TimeoutError instance, since
                     # that class subclasses it.
+                    consecutive_service_unavailable = 0
                     continue  # no messages available right now - normal idle poll
+                except nats.js.errors.ServiceUnavailableError:
+                    # Found live in production: the JetStream API
+                    # itself answered the pull with a 503, e.g. a
+                    # transient broker-side hiccup or right after NATS
+                    # restarts. Explicitly NOT the same as the
+                    # stream/durable consumer genuinely not existing
+                    # (nats.js.errors.NotFoundError - a real config
+                    # problem, left uncaught/fatal, same as
+                    # ConnectionClosedError below) - a 503 means "come
+                    # back later," so this is logged and retried with
+                    # capped exponential backoff, never left to crash
+                    # the process. All existing per-message semantics
+                    # (explicit ack, inbox dedup, version-gated
+                    # projections) are untouched - no message was even
+                    # fetched yet.
+                    backoff_index = min(
+                        consecutive_service_unavailable,
+                        len(self._service_unavailable_backoff_s) - 1,
+                    )
+                    delay = self._service_unavailable_backoff_s[backoff_index]
+                    logger.warning(
+                        "JetStream API reported ServiceUnavailableError on fetch "
+                        "(consecutive=%s) - treating as transient, retrying in %ss.",
+                        consecutive_service_unavailable + 1,
+                        delay,
+                    )
+                    consecutive_service_unavailable += 1
+                    await asyncio.sleep(delay)
+                    continue
                 except nats.errors.ConnectionClosedError:
                     self._state_view.mark_connected(False)
                     raise
 
+                consecutive_service_unavailable = 0
                 for msg in msgs:
                     await self.handle_message(msg)
         finally:

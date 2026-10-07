@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
+import nats.js.errors
 import pytest
 
 from activity_insights.consumer_state import ConsumerStateView
@@ -145,3 +146,73 @@ async def test_run_forever_survives_a_raw_builtin_timeout_error_from_an_idle_fet
 
     assert call_count >= 2
     processor.process.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_forever_survives_a_transient_service_unavailable_error_and_keeps_polling() -> (
+    None
+):
+    """Regression test for a real crash found live on Railway: the
+    JetStream API answered a pull fetch with a 503
+    (nats.js.errors.ServiceUnavailableError) - e.g. a transient
+    broker-side hiccup - which was not caught at all, so it propagated
+    through asyncio.gather() in main.py and killed the whole process.
+    This must now be treated as transient: logged, retried with
+    backoff, and the fetch loop must keep going - never crash, and
+    never skip straight to processing a message that was never
+    fetched (inbox/ack semantics for real messages are untouched by
+    this path)."""
+    processor = AsyncMock()
+    stop_event = asyncio.Event()
+    call_count = 0
+
+    async def fetch(*_args: object, **_kwargs: object) -> list[object]:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            stop_event.set()
+        raise nats.js.errors.ServiceUnavailableError()
+
+    sub = MagicMock()
+    sub.fetch = fetch
+    js = MagicMock()
+    js.pull_subscribe_bind = AsyncMock(return_value=sub)
+
+    consumer = EventConsumer(
+        js=js,
+        processor=processor,
+        state_view=ConsumerStateView("test"),
+        # Near-zero so the test doesn't actually wait through the real
+        # (1.0, 2.0, 4.0, ...) production backoff schedule.
+        service_unavailable_backoff_s=(0.0, 0.0, 0.0),
+    )
+
+    await consumer.run_forever(stop_event)  # must return normally - never raise
+
+    assert call_count >= 3
+    processor.process.assert_not_called()  # no message was ever actually fetched
+
+
+@pytest.mark.asyncio
+async def test_run_forever_does_not_swallow_a_permanent_notfound_error() -> None:
+    """The stream/durable consumer genuinely not existing raises
+    nats.js.errors.NotFoundError - a sibling of ServiceUnavailableError
+    under APIError, not a subclass of it, so the ServiceUnavailableError
+    handler must not catch it. A real configuration problem like this
+    must still surface (and crash, same as ConnectionClosedError),
+    never be silently retried forever as if it were transient."""
+    processor = AsyncMock()
+    stop_event = asyncio.Event()
+
+    async def fetch(*_args: object, **_kwargs: object) -> list[object]:
+        raise nats.js.errors.NotFoundError("consumer not found")
+
+    sub = MagicMock()
+    sub.fetch = fetch
+    js = MagicMock()
+    js.pull_subscribe_bind = AsyncMock(return_value=sub)
+
+    consumer = EventConsumer(js=js, processor=processor, state_view=ConsumerStateView("test"))
+
+    with pytest.raises(nats.js.errors.NotFoundError):
+        await consumer.run_forever(stop_event)
