@@ -23,7 +23,14 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY . .
-RUN npm ci && npm run build
+# npm ci hit the same well-documented npm bug (npm/cli#4828) already
+# worked around in admin-ui/Dockerfile: optional, platform-specific
+# native dependencies pulled in by this lockfile's own transitive tree
+# (e.g. @emnapi/core, @emnapi/runtime) weren't installed even though
+# npm's own dependency resolution needs them on this platform. `npm
+# install` resolves this the same way it did there; nothing about the
+# application's own dependencies changed.
+RUN npm install && npm run build
 
 ENV NODE_ENV=production
 
