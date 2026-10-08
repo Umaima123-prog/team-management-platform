@@ -13,6 +13,17 @@ FROM node:22-slim
 
 WORKDIR /app
 
+# Vite inlines import.meta.env.VITE_* at BUILD time, reading it from
+# this build step's own process.env - Railway passes service variables
+# to a Dockerfile build as --build-arg, but only for names explicitly
+# declared with ARG here; without this, `npm run build` below never
+# saw the real value and silently fell back to the client's own
+# `http://localhost:3000` default (the real bug behind "Could not
+# reach the server" - the browser was never pointed at
+# management-service's real public URL in the first place).
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
+
 COPY . .
 RUN npm install && npm run build
 
