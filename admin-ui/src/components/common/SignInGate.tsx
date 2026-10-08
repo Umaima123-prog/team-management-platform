@@ -1,20 +1,19 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
-import { useCurrentUser } from '../../context/CurrentUserContext'
+import { useAuth } from '../../context/AuthContext'
 import { LoadingSpinner } from './LoadingSpinner'
 
 /**
- * Blocks the rest of the app until a known user id is entered AND
- * confirmed by the server - a stored-but-unverified id (`status ===
- * 'checking'`) must never flash protected content, since it might
- * turn out to be stale (see CurrentUserContext). There is no
- * anonymous "list users" route to bootstrap from (by design - see
- * docs/ARCHITECTURE.md) - the very first sign-in on a clean install
- * genuinely requires knowing one real seeded user id (printed by
- * `npm run seed` in services/management-service).
+ * Blocks the rest of the app until a real session exists - a
+ * candidate session restored from the refresh cookie (`status ===
+ * 'checking'`) must never flash protected content before the silent
+ * refresh actually confirms it (see AuthContext). Below, a plain
+ * email/password form; the backend is the only thing that ever
+ * verifies a password - this component just collects it.
  */
 export function SignInGate({ children }: { children: ReactNode }): ReactNode {
-  const { status, signIn, signInError, signingIn } = useCurrentUser()
-  const [input, setInput] = useState('')
+  const { status, login, loginError, loggingIn } = useAuth()
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
 
   if (status === 'checking') {
     return (
@@ -28,7 +27,7 @@ export function SignInGate({ children }: { children: ReactNode }): ReactNode {
 
   function handleSubmit(event: FormEvent): void {
     event.preventDefault()
-    void signIn(input)
+    void login(email, password)
   }
 
   return (
@@ -36,32 +35,48 @@ export function SignInGate({ children }: { children: ReactNode }): ReactNode {
       <div className="card shadow-sm" style={{ width: '24rem' }}>
         <div className="card-body">
           <h1 className="h4 mb-3">Team Management Platform</h1>
-          <p className="text-muted small">
-            This is a development tool with no real authentication (see{' '}
-            <code>docs/ARCHITECTURE.md</code>, "Request context / trust model"). Enter a user id
-            from <code>npm run seed</code>&rsquo;s output to continue.
-          </p>
+          <p className="text-muted small">Sign in with your email and password to continue.</p>
           <form onSubmit={handleSubmit}>
-            <label htmlFor="userId" className="form-label">
-              User id
-            </label>
-            <input
-              id="userId"
-              name="userId"
-              className="form-control"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="e.g. 66f1a2b3c4d5e6f7a8b9c0d1"
-              autoFocus
-              aria-describedby={signInError ? 'sign-in-error' : undefined}
-            />
-            {signInError && (
-              <div id="sign-in-error" className="text-danger small mt-2" role="alert">
-                {signInError}
+            <div className="mb-3">
+              <label htmlFor="login-email" className="form-label">
+                Email
+              </label>
+              <input
+                id="login-email"
+                name="email"
+                type="email"
+                className="form-control"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoFocus
+                autoComplete="username"
+                required
+                aria-describedby={loginError ? 'sign-in-error' : undefined}
+              />
+            </div>
+            <div className="mb-3">
+              <label htmlFor="login-password" className="form-label">
+                Password
+              </label>
+              <input
+                id="login-password"
+                name="password"
+                type="password"
+                className="form-control"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="current-password"
+                required
+                aria-describedby={loginError ? 'sign-in-error' : undefined}
+              />
+            </div>
+            {loginError && (
+              <div id="sign-in-error" className="text-danger small mb-2" role="alert">
+                {loginError}
               </div>
             )}
-            <button type="submit" className="btn btn-primary w-100 mt-3" disabled={signingIn}>
-              {signingIn ? 'Signing in…' : 'Continue'}
+            <button type="submit" className="btn btn-primary w-100" disabled={loggingIn}>
+              {loggingIn ? 'Signing in…' : 'Sign In'}
             </button>
           </form>
         </div>

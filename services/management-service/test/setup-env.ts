@@ -34,3 +34,10 @@ process.env.NATS_URL ??= 'nats://127.0.0.1:4224';
 // unit/e2e suite (open-handle noise, irrelevant log spam) - the
 // dedicated NATS integration suite explicitly re-enables it.
 process.env.OUTBOX_RELAY_DISABLED ??= 'true';
+
+// Phase 9: test-only JWT secrets, same "no real secret ever needed to
+// run the suite" reasoning as MONGODB_URI above - these values sign
+// tokens that only ever exist within a single test process's memory,
+// never anything persisted or deployed.
+process.env.JWT_SECRET ??= 'test-only-access-token-secret-not-for-real-use';
+process.env.JWT_REFRESH_SECRET ??= 'test-only-refresh-token-secret-not-for-real-use';

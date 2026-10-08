@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ClientSession, ObjectId } from 'mongodb';
 import { BoardsService } from '../boards/boards.service';
 import { DatabaseService } from '../database/database.service';
@@ -6,6 +6,7 @@ import { OutboxService } from '../messaging/outbox/outbox.service';
 import { ProjectsService } from '../projects/projects.service';
 import { MembershipsRepository } from '../teams/memberships.repository';
 import { UsersRepository } from '../identity/users.repository';
+import { UserRole } from '../identity/user.schema';
 import { CountersRepository } from './counters.repository';
 import { RANK_GAP } from './rank.util';
 import { WorkItemsRepository } from './work-items.repository';
@@ -15,6 +16,10 @@ const WORKSPACE = 'ws-1';
 const PROJECT_ID = 'proj-1';
 const TEAM_ID = 'team-1';
 const REQUESTER = 'user-1';
+// Every pre-existing test in this file predates the ownership rule
+// (added after a later authorization review) and exercises these
+// methods as an ADMIN would use them - unaffected by it.
+const REQUESTER_ROLE: UserRole = 'ADMIN';
 const CORRELATION_ID = 'corr-1';
 const FAKE_SESSION = {} as ClientSession;
 
@@ -300,6 +305,7 @@ describe('WorkItemsService', () => {
           itemId,
           { expectedVersion: 1, targetColumnId: 'nope' },
           REQUESTER,
+          REQUESTER_ROLE,
           CORRELATION_ID,
         ),
       ).rejects.toThrow(BadRequestException);
@@ -317,6 +323,7 @@ describe('WorkItemsService', () => {
           itemId,
           { expectedVersion: 1, targetColumnId: 'col-todo', beforeItemId: 'missing' },
           REQUESTER,
+          REQUESTER_ROLE,
           CORRELATION_ID,
         ),
       ).rejects.toThrow(BadRequestException);
@@ -328,6 +335,7 @@ describe('WorkItemsService', () => {
         itemId,
         { expectedVersion: 1, targetColumnId: 'col-todo' },
         REQUESTER,
+        REQUESTER_ROLE,
         CORRELATION_ID,
       );
 
@@ -354,6 +362,7 @@ describe('WorkItemsService', () => {
         itemId,
         { expectedVersion: 1, targetColumnId: 'col-todo', beforeItemId: beforeId, afterItemId: afterId },
         REQUESTER,
+        REQUESTER_ROLE,
         CORRELATION_ID,
       );
 
@@ -386,6 +395,7 @@ describe('WorkItemsService', () => {
         itemId,
         { expectedVersion: 1, targetColumnId: 'col-todo', beforeItemId: beforeId, afterItemId: afterId },
         REQUESTER,
+        REQUESTER_ROLE,
         CORRELATION_ID,
       );
 
@@ -408,6 +418,7 @@ describe('WorkItemsService', () => {
         itemId,
         { expectedVersion: 1, targetColumnId: 'col-todo' },
         REQUESTER,
+        REQUESTER_ROLE,
         CORRELATION_ID,
       );
 
@@ -431,6 +442,7 @@ describe('WorkItemsService', () => {
           itemId,
           { expectedVersion: 1, targetColumnId: 'col-todo' },
           REQUESTER,
+          REQUESTER_ROLE,
           CORRELATION_ID,
         ),
       ).rejects.toThrow('conflict');
@@ -450,6 +462,7 @@ describe('WorkItemsService', () => {
         'item-1',
         { expectedVersion: 1, priority: 'HIGH' } as never,
         REQUESTER,
+        REQUESTER_ROLE,
         CORRELATION_ID,
       );
 
@@ -475,6 +488,7 @@ describe('WorkItemsService', () => {
         'item-1',
         { expectedVersion: 1, title: 'Secret project codename' },
         REQUESTER,
+        REQUESTER_ROLE,
         CORRELATION_ID,
       );
 

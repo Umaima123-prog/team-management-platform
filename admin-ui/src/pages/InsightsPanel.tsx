@@ -1,4 +1,3 @@
-import { useCurrentUser } from '../context/CurrentUserContext'
 import { useAsync } from '../hooks/useAsync'
 import { getBoard, getProjectInsights, listUsers } from '../api/endpoints'
 import { ErrorAlert } from '../components/common/ErrorAlert'
@@ -7,17 +6,12 @@ import { LoadingSpinner } from '../components/common/LoadingSpinner'
 const STALE_AFTER_MS = 60_000
 
 export function InsightsPanel({ projectId }: { projectId: string }): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
   const { data, loading, error, reload } = useAsync(
-    (signal) => getProjectInsights({ userId, signal }, projectId),
-    [userId, projectId],
+    (signal) => getProjectInsights({ signal }, projectId),
+    [projectId],
   )
-  const { data: usersPage } = useAsync((signal) => listUsers({ userId, signal }), [userId])
-  const { data: board } = useAsync((signal) => getBoard({ userId, signal }, projectId), [
-    userId,
-    projectId,
-  ])
+  const { data: usersPage } = useAsync((signal) => listUsers({ signal }), [])
+  const { data: board } = useAsync((signal) => getBoard({ signal }, projectId), [projectId])
 
   function userName(id: string | null): string {
     if (!id) return 'Unassigned'

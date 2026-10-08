@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { useCurrentUser } from '../context/CurrentUserContext'
+import { useAuth } from '../context/AuthContext'
 import { assignWorkItem, updateWorkItem } from '../api/endpoints'
 import { ApiError } from '../api/client'
 import type { Membership, User, WorkItem } from '../api/types'
@@ -24,8 +24,14 @@ interface ItemDrawerProps {
  * UI, it does not and must not replace the server check.
  */
 export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: ItemDrawerProps): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'ADMIN'
+  const canAssign = isAdmin
+  // Server-enforced rule (WorkItemsService.assertCanMutateAssignedItem):
+  // ADMIN may update/move any item; EMPLOYEE only one currently
+  // assigned to them. Mirrored here so the UI never offers a control
+  // the server would reject - it is not itself the security boundary.
+  const canUpdate = isAdmin || item.assigneeId === user?.id
   const { showToast } = useToast()
   const closeButtonRef = useRef<HTMLButtonElement>(null)
 
@@ -57,13 +63,14 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
   }
 
   async function handleSave(): Promise<void> {
+    if (!canUpdate) return
     setSaveError(null)
     setSaving(true)
     try {
       let version = item.version
 
-      if (assigneeId !== (item.assigneeId ?? '')) {
-        const updated = await assignWorkItem({ userId }, item.id, version, assigneeId || null)
+      if (canAssign && assigneeId !== (item.assigneeId ?? '')) {
+        const updated = await assignWorkItem({}, item.id, version, assigneeId || null)
         version = updated.version
       }
 
@@ -80,7 +87,7 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
         dueDate !== (item.dueDate ? item.dueDate.slice(0, 10) : '')
 
       if (fieldsChanged) {
-        await updateWorkItem({ userId }, item.id, {
+        await updateWorkItem({}, item.id, {
           expectedVersion: version,
           title,
           description: description || null,
@@ -140,6 +147,7 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
             className="form-control"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
+            disabled={!canUpdate}
           />
         </div>
 
@@ -157,6 +165,7 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
             rows={4}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
+            disabled={!canUpdate}
           />
         </div>
 
@@ -165,7 +174,13 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
             <label htmlFor="item-type" className="form-label">
               Type
             </label>
-            <select id="item-type" className="form-select" value={type} onChange={(e) => setType(e.target.value)}>
+            <select
+              id="item-type"
+              className="form-select"
+              value={type}
+              onChange={(e) => setType(e.target.value)}
+              disabled={!canUpdate}
+            >
               <option value="TASK">TASK</option>
               <option value="BUG">BUG</option>
               <option value="STORY">STORY</option>
@@ -180,6 +195,7 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
               className="form-select"
               value={priority}
               onChange={(e) => setPriority(e.target.value)}
+              disabled={!canUpdate}
             >
               <option value="LOW">LOW</option>
               <option value="MEDIUM">MEDIUM</option>
@@ -193,20 +209,28 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
           <label htmlFor="item-assignee" className="form-label">
             Assignee
           </label>
-          <select
-            id="item-assignee"
-            className="form-select"
-            value={assigneeId}
-            onChange={(e) => setAssigneeId(e.target.value)}
-          >
-            <option value="">Unassigned</option>
-            {teamMembers.map((m) => (
-              <option key={m.userId} value={m.userId}>
-                {userName(m.userId)}
-              </option>
-            ))}
-          </select>
-          <div className="form-text">Only the project&rsquo;s owning team&rsquo;s members can be assigned.</div>
+          {canAssign ? (
+            <>
+              <select
+                id="item-assignee"
+                className="form-select"
+                value={assigneeId}
+                onChange={(e) => setAssigneeId(e.target.value)}
+              >
+                <option value="">Unassigned</option>
+                {teamMembers.map((m) => (
+                  <option key={m.userId} value={m.userId}>
+                    {userName(m.userId)}
+                  </option>
+                ))}
+              </select>
+              <div className="form-text">Only the project&rsquo;s owning team&rsquo;s members can be assigned.</div>
+            </>
+          ) : (
+            <p className="mb-0" id="item-assignee">
+              {userName(item.assigneeId)}
+            </p>
+          )}
         </div>
 
         <div className="mb-3">
@@ -225,6 +249,7 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
             value={labelsText}
             onChange={(e) => setLabelsText(e.target.value)}
             placeholder="comma, separated, labels"
+            disabled={!canUpdate}
           />
         </div>
 
@@ -238,10 +263,18 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
             className="form-control"
             value={dueDate}
             onChange={(e) => setDueDate(e.target.value)}
+            disabled={!canUpdate}
           />
         </div>
 
         <p className="text-muted small">Version {item.version}</p>
+
+        {!canUpdate && (
+          <div className="alert alert-secondary" role="status">
+            This item is assigned to someone else - you can view it, but only its assignee or an
+            admin can update or move it.
+          </div>
+        )}
 
         {saveError && (
           <div className="alert alert-danger" role="alert">
@@ -250,7 +283,12 @@ export function ItemDrawer({ item, teamMembers, users, onClose, onUpdated }: Ite
         )}
 
         <div className="d-flex gap-2">
-          <button type="button" className="btn btn-primary" onClick={() => void handleSave()} disabled={saving}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => void handleSave()}
+            disabled={saving || !canUpdate}
+          >
             {saving ? 'Saving…' : 'Save'}
           </button>
           <button type="button" className="btn btn-outline-secondary" onClick={onClose}>

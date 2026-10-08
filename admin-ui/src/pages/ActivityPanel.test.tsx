@@ -1,17 +1,14 @@
 import { screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { ActivityPanel } from './ActivityPanel'
 import { renderWithProviders } from '../test/renderWithProviders'
-import { installMockFetch } from '../test/mockApi'
-import { ALICE, ALL_USERS, PROJECT } from '../test/fixtures'
-
-beforeEach(() => {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-})
+import { installMockFetch, authSessionRoutes } from '../test/mockApi'
+import { ALICE, ALICE_AUTH, ALL_USERS, PROJECT } from '../test/fixtures'
 
 describe('ActivityPanel', () => {
   it('renders actor, action, affected item, and time in chronological (newest-first) order', async () => {
     installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
       { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
       {
         path: `/api/projects/${PROJECT.id}/activity`,
@@ -59,6 +56,7 @@ describe('ActivityPanel', () => {
 
   it('shows the human-readable issue key instead of the raw internal WorkItem id when available', async () => {
     installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
       { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
       {
         path: `/api/projects/${PROJECT.id}/activity`,
@@ -108,6 +106,7 @@ describe('ActivityPanel', () => {
 
   it('shows a clear not_ready message rather than an empty or broken view', async () => {
     installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
       { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
       {
         path: `/api/projects/${PROJECT.id}/activity`,

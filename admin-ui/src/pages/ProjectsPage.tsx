@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { useCurrentUser } from '../context/CurrentUserContext'
+import { useAuth } from '../context/AuthContext'
 import { useAsync } from '../hooks/useAsync'
 import { createProject, listProjects, listTeams, listUsers } from '../api/endpoints'
 import { ErrorAlert, errorMessage } from '../components/common/ErrorAlert'
@@ -8,14 +8,11 @@ import { LoadingSpinner } from '../components/common/LoadingSpinner'
 import { useToast } from '../context/ToastContext'
 
 export function ProjectsPage(): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
-  const { data, loading, error, reload } = useAsync(
-    (signal) => listProjects({ userId, signal }),
-    [userId],
-  )
-  const { data: teamsPage } = useAsync((signal) => listTeams({ userId, signal }), [userId])
-  const { data: usersPage } = useAsync((signal) => listUsers({ userId, signal }), [userId])
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'ADMIN'
+  const { data, loading, error, reload } = useAsync((signal) => listProjects({ signal }), [])
+  const { data: teamsPage } = useAsync((signal) => listTeams({ signal }), [])
+  const { data: usersPage } = useAsync((signal) => listUsers({ signal }), [])
   const { showToast } = useToast()
 
   const [projectKey, setProjectKey] = useState('')
@@ -30,7 +27,7 @@ export function ProjectsPage(): React.ReactElement {
     setSubmitError(null)
     setSubmitting(true)
     try {
-      await createProject({ userId }, { projectKey, name, teamId, ownerId: ownerId || userId })
+      await createProject({}, { projectKey, name, teamId, ownerId: ownerId || user?.id || '' })
       setProjectKey('')
       setName('')
       setTeamId('')
@@ -48,87 +45,89 @@ export function ProjectsPage(): React.ReactElement {
     <div>
       <h1 className="h3 mb-4">Projects</h1>
 
-      <div className="card mb-4">
-        <div className="card-body">
-          <h2 className="h6">Create a project</h2>
-          <form onSubmit={handleSubmit} className="row g-2 align-items-end">
-            <div className="col-sm-2">
-              <label htmlFor="project-key" className="form-label">
-                Key
-              </label>
-              <input
-                id="project-key"
-                className="form-control"
-                value={projectKey}
-                onChange={(e) => setProjectKey(e.target.value.toUpperCase())}
-                maxLength={10}
-                required
-              />
-            </div>
-            <div className="col-sm-3">
-              <label htmlFor="project-name" className="form-label">
-                Name
-              </label>
-              <input
-                id="project-name"
-                className="form-control"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
-            <div className="col-sm-3">
-              <label htmlFor="project-team" className="form-label">
-                Owning team
-              </label>
-              <select
-                id="project-team"
-                className="form-select"
-                value={teamId}
-                onChange={(e) => setTeamId(e.target.value)}
-                required
-              >
-                <option value="">Select a team…</option>
-                {(teamsPage?.items ?? [])
-                  .filter((t) => !t.archivedAt)
-                  .map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.name}
+      {isAdmin && (
+        <div className="card mb-4">
+          <div className="card-body">
+            <h2 className="h6">Create a project</h2>
+            <form onSubmit={handleSubmit} className="row g-2 align-items-end">
+              <div className="col-sm-2">
+                <label htmlFor="project-key" className="form-label">
+                  Key
+                </label>
+                <input
+                  id="project-key"
+                  className="form-control"
+                  value={projectKey}
+                  onChange={(e) => setProjectKey(e.target.value.toUpperCase())}
+                  maxLength={10}
+                  required
+                />
+              </div>
+              <div className="col-sm-3">
+                <label htmlFor="project-name" className="form-label">
+                  Name
+                </label>
+                <input
+                  id="project-name"
+                  className="form-control"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="col-sm-3">
+                <label htmlFor="project-team" className="form-label">
+                  Owning team
+                </label>
+                <select
+                  id="project-team"
+                  className="form-select"
+                  value={teamId}
+                  onChange={(e) => setTeamId(e.target.value)}
+                  required
+                >
+                  <option value="">Select a team…</option>
+                  {(teamsPage?.items ?? [])
+                    .filter((t) => !t.archivedAt)
+                    .map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              <div className="col-sm-3">
+                <label htmlFor="project-owner" className="form-label">
+                  Owner
+                </label>
+                <select
+                  id="project-owner"
+                  className="form-select"
+                  value={ownerId}
+                  onChange={(e) => setOwnerId(e.target.value)}
+                >
+                  <option value="">Me ({user?.name})</option>
+                  {(usersPage?.items ?? []).map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name}
                     </option>
                   ))}
-              </select>
-            </div>
-            <div className="col-sm-3">
-              <label htmlFor="project-owner" className="form-label">
-                Owner
-              </label>
-              <select
-                id="project-owner"
-                className="form-select"
-                value={ownerId}
-                onChange={(e) => setOwnerId(e.target.value)}
-              >
-                <option value="">Me ({currentUser?.name})</option>
-                {(usersPage?.items ?? []).map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="col-sm-1">
-              <button type="submit" className="btn btn-primary w-100" disabled={submitting}>
-                {submitting ? '…' : 'Add'}
-              </button>
-            </div>
-          </form>
-          {submitError && (
-            <div className="alert alert-danger mt-3 mb-0" role="alert">
-              {submitError}
-            </div>
-          )}
+                </select>
+              </div>
+              <div className="col-sm-1">
+                <button type="submit" className="btn btn-primary w-100" disabled={submitting}>
+                  {submitting ? '…' : 'Add'}
+                </button>
+              </div>
+            </form>
+            {submitError && (
+              <div className="alert alert-danger mt-3 mb-0" role="alert">
+                {submitError}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {loading && <LoadingSpinner label="Loading projects…" />}
       {error && <ErrorAlert error={error} onRetry={reload} />}

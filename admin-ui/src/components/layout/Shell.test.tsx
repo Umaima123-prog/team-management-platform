@@ -1,12 +1,12 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { Shell } from './Shell'
-import { CurrentUserProvider } from '../../context/CurrentUserContext'
+import { AuthProvider } from '../../context/AuthContext'
 import { ToastProvider } from '../../context/ToastContext'
-import { installMockFetch } from '../../test/mockApi'
-import { ALICE, ALL_USERS } from '../../test/fixtures'
+import { installMockFetch, authSessionRoutes } from '../../test/mockApi'
+import { ALICE_AUTH, ALL_USERS } from '../../test/fixtures'
 
 /**
  * jsdom does not evaluate @media queries or compute real layout, so
@@ -18,10 +18,12 @@ import { ALICE, ALL_USERS } from '../../test/fixtures'
  * - see docs/TIMELOG.md.
  */
 function renderShell(initialPath = '/') {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-  installMockFetch([{ path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) }])
+  installMockFetch([
+    ...authSessionRoutes(ALICE_AUTH),
+    { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+  ])
   return render(
-    <CurrentUserProvider>
+    <AuthProvider>
       <ToastProvider>
         <MemoryRouter initialEntries={[initialPath]}>
           <Shell>
@@ -32,13 +34,9 @@ function renderShell(initialPath = '/') {
           </Shell>
         </MemoryRouter>
       </ToastProvider>
-    </CurrentUserProvider>,
+    </AuthProvider>,
   )
 }
-
-beforeEach(() => {
-  window.localStorage.clear()
-})
 
 describe('Shell mobile sidebar behavior', () => {
   it('starts closed, opens via the hamburger button, and reflects that in aria-expanded', async () => {

@@ -1,5 +1,4 @@
 import { Link } from 'react-router-dom'
-import { useCurrentUser } from '../context/CurrentUserContext'
 import { useAsync } from '../hooks/useAsync'
 import { ErrorAlert } from '../components/common/ErrorAlert'
 import { LoadingSpinner } from '../components/common/LoadingSpinner'
@@ -21,10 +20,10 @@ interface DashboardStats {
  * bounded, not paginated, and honestly labeled when truncated. */
 const MAX_PROJECTS_SCANNED = 20
 
-async function loadStats(userId: string, signal: AbortSignal): Promise<DashboardStats> {
+async function loadStats(signal: AbortSignal): Promise<DashboardStats> {
   const [teamsPage, projectsPage] = await Promise.all([
-    listTeams({ userId, signal }),
-    listProjects({ userId, signal }),
+    listTeams({ signal }),
+    listProjects({ signal }),
   ])
 
   const activeProjects = projectsPage.items.filter((p) => !p.archivedAt)
@@ -37,8 +36,8 @@ async function loadStats(userId: string, signal: AbortSignal): Promise<Dashboard
   await Promise.all(
     scanned.map(async (project: Project) => {
       const [board, itemsPage] = await Promise.all([
-        getBoard({ userId, signal }, project.id),
-        listWorkItems({ userId, signal }, project.id, { includeArchived: false, limit: 100 }),
+        getBoard({ signal }, project.id),
+        listWorkItems({ signal }, project.id, { includeArchived: false, limit: 100 }),
       ])
       const doneColumnId = board.columns.reduce(
         (max, col) => (col.order > max.order ? col : max),
@@ -82,10 +81,10 @@ function StatCard({
   )
 }
 
-function FreshnessPanel({ userId, projectId }: { userId: string; projectId: string }): React.ReactElement {
+function FreshnessPanel({ projectId }: { projectId: string }): React.ReactElement {
   const { data, loading, error } = useAsync(
-    (signal) => getProjectInsights({ userId, signal }, projectId),
-    [userId, projectId],
+    (signal) => getProjectInsights({ signal }, projectId),
+    [projectId],
   )
 
   if (loading) return <LoadingSpinner label="Checking projection freshness…" />
@@ -109,14 +108,9 @@ function FreshnessPanel({ userId, projectId }: { userId: string; projectId: stri
 }
 
 export function DashboardPage(): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
-  const { data, loading, error, reload } = useAsync((signal) => loadStats(userId, signal), [userId])
+  const { data, loading, error, reload } = useAsync((signal) => loadStats(signal), [])
 
-  const { data: projectsForFreshness } = useAsync(
-    (signal) => listProjects({ userId, signal }),
-    [userId],
-  )
+  const { data: projectsForFreshness } = useAsync((signal) => listProjects({ signal }), [])
   const sampleProject = projectsForFreshness?.items.find((p) => !p.archivedAt) ?? null
 
   return (
@@ -151,7 +145,7 @@ export function DashboardPage(): React.ReactElement {
                 <Link to={`/projects/${sampleProject.id}`}>{sampleProject.name}</Link> - visit any
                 project&rsquo;s Insights tab for its own freshness.
               </p>
-              <FreshnessPanel userId={userId} projectId={sampleProject.id} />
+              <FreshnessPanel projectId={sampleProject.id} />
             </>
           ) : (
             <p className="text-muted small mb-0">

@@ -1,5 +1,6 @@
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import cookieParser from 'cookie-parser';
 import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { configureApp } from './bootstrap';
@@ -19,11 +20,11 @@ async function bootstrap() {
   // static host), so it needs CORS - never enabled before Phase 6
   // because nothing but same-origin tooling (curl, supertest, Postman)
   // called this API. Scoped to an explicit, configurable allow-list
-  // (never a wildcard) - no credentials/cookies are used (the trust
-  // mechanism is a header, not a cookie), so this does not widen the
-  // existing X-Dev-User-Id trust model (docs/ARCHITECTURE.md "Request
-  // context / trust model") to any origin that can merely draw a
-  // <script> tag.
+  // (never a wildcard). Phase 9: `credentials: true` is now required -
+  // the refresh token travels as an HttpOnly cookie, and a wildcard
+  // origin is rejected by browsers outright once credentials are
+  // involved, so the explicit allow-list is now load-bearing for
+  // security, not just tidiness.
   const adminUiOrigins = (process.env.ADMIN_UI_ORIGIN ?? 'http://localhost:5173')
     .split(',')
     .map((origin) => origin.trim())
@@ -31,8 +32,13 @@ async function bootstrap() {
   app.enableCors({
     origin: adminUiOrigins,
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'X-Dev-User-Id', 'X-Correlation-Id'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Correlation-Id'],
+    credentials: true,
   });
+
+  // Parses the refresh-token cookie (HttpOnly, set by
+  // AuthController) - req.cookies would otherwise be undefined.
+  app.use(cookieParser());
 
   // Explicit, documented request-body cap (abuse-control baseline,
   // see docs/DECISIONS.md) - well above any legitimate payload this

@@ -12,6 +12,20 @@ export interface User {
   createdAt: string
 }
 
+export type UserRole = 'ADMIN' | 'EMPLOYEE'
+
+/** The authenticated caller, as returned by login/refresh/GET
+ * /api/auth/me - never a user the caller merely claims to be (see
+ * docs/ARCHITECTURE.md "Request context / trust model"). */
+export interface AuthUser {
+  id: string
+  workspaceId: string
+  name: string
+  email: string
+  role: UserRole
+  active: boolean
+}
+
 export type TeamRole = 'OWNER' | 'LEAD' | 'MEMBER'
 
 export interface Team {

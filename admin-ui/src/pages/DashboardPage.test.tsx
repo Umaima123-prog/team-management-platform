@@ -1,18 +1,15 @@
 import { screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { DashboardPage } from './DashboardPage'
 import { renderWithProviders } from '../test/renderWithProviders'
-import { installMockFetch } from '../test/mockApi'
-import { ALICE, BOARD, ITEM_A, ITEM_B, ITEM_C, PROJECT, TEAM } from '../test/fixtures'
-
-beforeEach(() => {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-})
+import { installMockFetch, authSessionRoutes } from '../test/mockApi'
+import { ALICE, ALICE_AUTH, BOARD, ITEM_A, ITEM_B, ITEM_C, PROJECT, TEAM } from '../test/fixtures'
 
 describe('DashboardPage', () => {
   it('shows real team/project/open-item/overdue counts derived from the actual API responses', async () => {
     const overdueItem = { ...ITEM_C, id: 'item-overdue', dueDate: '2020-01-01T00:00:00.000Z' }
     installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
       { path: '/api/users', handler: () => ({ body: { items: [ALICE] } }) },
       { path: '/api/teams', handler: () => ({ body: { items: [TEAM] } }) },
       { path: '/api/projects', handler: () => ({ body: { items: [PROJECT] } }) },

@@ -1,4 +1,5 @@
 import { vi } from 'vitest'
+import type { AuthUser } from '../api/types'
 
 export interface MockRoute {
   method?: string
@@ -38,4 +39,24 @@ export function installMockFetch(routes: MockRoute[]): ReturnType<typeof vi.fn> 
 
 export function errorBody(code: string, message: string, details?: unknown) {
   return { error: { code, message, details } }
+}
+
+/** Routes every test that renders through AuthProvider needs: it
+ * always attempts a silent `/api/auth/refresh` on mount (restoring a
+ * session from the HttpOnly cookie) - mocking it to succeed is the
+ * test equivalent of "a valid session already exists", exactly as it
+ * works against the real backend. */
+export function authSessionRoutes(user: AuthUser): MockRoute[] {
+  return [
+    {
+      method: 'POST',
+      path: '/api/auth/refresh',
+      handler: () => ({ body: { accessToken: 'test-access-token', user } }),
+    },
+    {
+      method: 'POST',
+      path: '/api/auth/logout',
+      handler: () => ({ status: 204 }),
+    },
+  ]
 }

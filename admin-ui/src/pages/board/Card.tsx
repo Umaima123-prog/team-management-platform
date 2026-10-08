@@ -11,6 +11,7 @@ export function Card({
   item,
   columns,
   pending,
+  canMove,
   onOpen,
   onDragStart,
   onDragEnd,
@@ -22,6 +23,11 @@ export function Card({
   item: WorkItem
   columns: BoardColumn[]
   pending: boolean
+  /** Server-enforced rule (WorkItemsService.assertCanMutateAssignedItem):
+   * ADMIN may move any card; EMPLOYEE only one assigned to them. The
+   * card itself stays viewable either way - only the move controls
+   * are gated. */
+  canMove: boolean
   onOpen: () => void
   onDragStart: () => void
   onDragEnd: () => void
@@ -33,7 +39,7 @@ export function Card({
   return (
     <div
       className={`board-card${pending ? ' pending' : ''}`}
-      draggable={!pending}
+      draggable={!pending && canMove}
       onDragStart={(e) => {
         e.dataTransfer.setData('text/plain', item.id)
         onDragStart()
@@ -70,7 +76,7 @@ export function Card({
           type="button"
           className="btn btn-sm btn-outline-secondary"
           aria-label={`Move ${item.issueKey} up within its column`}
-          disabled={pending || !canMoveUp}
+          disabled={pending || !canMove || !canMoveUp}
           onClick={() => onReorder('up')}
         >
           ↑
@@ -79,7 +85,7 @@ export function Card({
           type="button"
           className="btn btn-sm btn-outline-secondary"
           aria-label={`Move ${item.issueKey} down within its column`}
-          disabled={pending || !canMoveDown}
+          disabled={pending || !canMove || !canMoveDown}
           onClick={() => onReorder('down')}
         >
           ↓
@@ -91,7 +97,7 @@ export function Card({
           id={`move-select-${item.id}`}
           className="form-select form-select-sm"
           value=""
-          disabled={pending}
+          disabled={pending || !canMove}
           onChange={(e) => {
             if (e.target.value) onMoveToColumn(e.target.value)
             e.target.value = ''

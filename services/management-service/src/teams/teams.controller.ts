@@ -11,6 +11,7 @@ import {
 import { CurrentContext } from '../common/context/current-context.decorator';
 import { RequestContext } from '../common/context/request-context';
 import { withId } from '../common/mongo/with-id.util';
+import { Roles } from '../auth/roles.decorator';
 import { AddMemberDto } from './dto/add-member.dto';
 import { ArchiveTeamDto } from './dto/archive-team.dto';
 import { CreateTeamDto } from './dto/create-team.dto';
@@ -22,6 +23,7 @@ import { TeamsService } from './teams.service';
 export class TeamsController {
   constructor(private readonly teamsService: TeamsService) {}
 
+  @Roles('ADMIN')
   @Post()
   async create(@CurrentContext() ctx: RequestContext, @Body() dto: CreateTeamDto) {
     const team = await this.teamsService.createTeam(ctx.workspaceId, ctx.userId, dto, ctx.correlationId);
@@ -43,6 +45,7 @@ export class TeamsController {
     return { ...withId(team), members: members.map(withId) };
   }
 
+  @Roles('ADMIN')
   @Patch(':teamId')
   async update(
     @CurrentContext() ctx: RequestContext,
@@ -53,6 +56,7 @@ export class TeamsController {
     return withId(team);
   }
 
+  @Roles('ADMIN')
   @Post(':teamId/archive')
   async archive(
     @CurrentContext() ctx: RequestContext,
@@ -68,6 +72,7 @@ export class TeamsController {
     return withId(team);
   }
 
+  @Roles('ADMIN')
   @Post(':teamId/members')
   async addMember(
     @CurrentContext() ctx: RequestContext,
@@ -84,6 +89,7 @@ export class TeamsController {
     return withId(membership);
   }
 
+  @Roles('ADMIN')
   @Patch(':teamId/members/:userId')
   async updateMemberRole(
     @CurrentContext() ctx: RequestContext,
@@ -101,6 +107,7 @@ export class TeamsController {
     return withId(membership);
   }
 
+  @Roles('ADMIN')
   @Delete(':teamId/members/:userId')
   async removeMember(
     @CurrentContext() ctx: RequestContext,

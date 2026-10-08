@@ -1,17 +1,14 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { BoardView } from './BoardView'
 import { renderWithProviders } from '../../test/renderWithProviders'
-import { installMockFetch } from '../../test/mockApi'
-import { ALICE, ALL_USERS, BOARD, ITEM_A, ITEM_B, PROJECT, TEAM_WITH_MEMBERS } from '../../test/fixtures'
-
-beforeEach(() => {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-})
+import { installMockFetch, authSessionRoutes } from '../../test/mockApi'
+import { ALICE_AUTH, ALL_USERS, BOARD, ITEM_A, ITEM_B, PROJECT, TEAM_WITH_MEMBERS } from '../../test/fixtures'
 
 function baseRoutes() {
   return [
+    ...authSessionRoutes(ALICE_AUTH),
     { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
     { path: `/api/teams/${TEAM_WITH_MEMBERS.id}`, handler: () => ({ body: TEAM_WITH_MEMBERS }) },
     { path: `/api/projects/${PROJECT.id}/board`, handler: () => ({ body: BOARD }) },

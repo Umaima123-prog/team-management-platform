@@ -1,19 +1,16 @@
 import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { ProjectsPage } from './ProjectsPage'
 import { renderWithProviders } from '../test/renderWithProviders'
-import { installMockFetch } from '../test/mockApi'
-import { ALICE, ALL_USERS, PROJECT, TEAM } from '../test/fixtures'
-
-beforeEach(() => {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-})
+import { installMockFetch, authSessionRoutes } from '../test/mockApi'
+import { ALICE, ALICE_AUTH, ALL_USERS, BOB_AUTH, PROJECT, TEAM } from '../test/fixtures'
 
 describe('ProjectsPage', () => {
   it('lists existing projects with status, and creates a new one choosing the owning team', async () => {
     let createdBody: unknown = null
     installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
       { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
       { path: '/api/teams', handler: () => ({ body: { items: [TEAM] } }) },
       { path: '/api/projects', handler: () => ({ body: { items: [PROJECT] } }) },
@@ -32,7 +29,7 @@ describe('ProjectsPage', () => {
     expect(await screen.findByText('Engine Overhaul')).toBeInTheDocument()
     expect(screen.getByText('ACTIVE')).toBeInTheDocument()
 
-    await userEvent.type(screen.getByLabelText('Key'), 'NEW')
+    await userEvent.type(await screen.findByLabelText('Key'), 'NEW')
     await userEvent.type(screen.getByLabelText('Name'), 'New Project')
     await userEvent.selectOptions(screen.getByLabelText('Owning team'), TEAM.id)
     await userEvent.click(screen.getByRole('button', { name: 'Add' }))
@@ -40,5 +37,20 @@ describe('ProjectsPage', () => {
     await waitFor(() =>
       expect(createdBody).toEqual({ projectKey: 'NEW', name: 'New Project', teamId: TEAM.id, ownerId: ALICE.id }),
     )
+  })
+
+  it('hides the "Create a project" form for an EMPLOYEE - creating projects is ADMIN-only', async () => {
+    installMockFetch([
+      ...authSessionRoutes(BOB_AUTH),
+      { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+      { path: '/api/teams', handler: () => ({ body: { items: [TEAM] } }) },
+      { path: '/api/projects', handler: () => ({ body: { items: [PROJECT] } }) },
+    ])
+
+    renderWithProviders(<ProjectsPage />)
+
+    expect(await screen.findByText('Engine Overhaul')).toBeInTheDocument()
+    expect(screen.queryByText('Create a project')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Key')).not.toBeInTheDocument()
   })
 })

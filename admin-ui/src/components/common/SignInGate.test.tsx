@@ -4,15 +4,15 @@ import { describe, expect, it } from 'vitest'
 import { SignInGate } from './SignInGate'
 import { renderWithProviders } from '../../test/renderWithProviders'
 import { installMockFetch, errorBody } from '../../test/mockApi'
-import { ALICE, ALL_USERS } from '../../test/fixtures'
+import { ALICE_AUTH } from '../../test/fixtures'
 
 describe('SignInGate', () => {
-  it('never flashes protected content for a stored-but-unverified id - shows a checking state until the server confirms it', async () => {
-    window.localStorage.setItem('admin-ui.currentUserId', 'stale-id')
+  it('never flashes protected content while a restored session is still being confirmed', async () => {
     installMockFetch([
       {
-        path: '/api/users',
-        handler: () => ({ status: 401, body: errorBody('UNAUTHENTICATED', 'Unknown user.') }),
+        method: 'POST',
+        path: '/api/auth/refresh',
+        handler: () => ({ status: 401, body: errorBody('UNAUTHENTICATED', 'No refresh token provided.') }),
       },
     ])
 
@@ -22,16 +22,27 @@ describe('SignInGate', () => {
       </SignInGate>,
     )
 
-    // Must never appear, not even transiently, before the stale id is rejected.
+    // Must never appear, not even transiently, before the silent
+    // refresh attempt resolves.
     expect(screen.queryByText('Protected content')).not.toBeInTheDocument()
 
-    await waitFor(() => expect(screen.getByLabelText('User id')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText('Email')).toBeInTheDocument())
     expect(screen.queryByText('Protected content')).not.toBeInTheDocument()
   })
 
-
-  it('blocks the app until a valid user id is entered', async () => {
-    installMockFetch([{ path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) }])
+  it('signs in with email/password and reveals the app', async () => {
+    installMockFetch([
+      {
+        method: 'POST',
+        path: '/api/auth/refresh',
+        handler: () => ({ status: 401, body: errorBody('UNAUTHENTICATED', 'No refresh token provided.') }),
+      },
+      {
+        method: 'POST',
+        path: '/api/auth/login',
+        handler: () => ({ body: { accessToken: 'test-access-token', user: ALICE_AUTH } }),
+      },
+    ])
 
     renderWithProviders(
       <SignInGate>
@@ -40,19 +51,26 @@ describe('SignInGate', () => {
     )
 
     expect(screen.queryByText('Protected content')).not.toBeInTheDocument()
-    expect(screen.getByLabelText('User id')).toBeInTheDocument()
+    await screen.findByLabelText('Email')
 
-    await userEvent.type(screen.getByLabelText('User id'), ALICE.id)
-    await userEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await userEvent.type(screen.getByLabelText('Email'), ALICE_AUTH.email)
+    await userEvent.type(screen.getByLabelText('Password'), 'AdminDemo#2026')
+    await userEvent.click(screen.getByRole('button', { name: 'Sign In' }))
 
     expect(await screen.findByText('Protected content')).toBeInTheDocument()
   })
 
-  it('shows a clear error, not a raw exception, for an unrecognized user id', async () => {
+  it('shows a clear error, not a raw exception, for an invalid login', async () => {
     installMockFetch([
       {
-        path: '/api/users',
-        handler: () => ({ status: 401, body: errorBody('UNAUTHENTICATED', 'Unknown user.') }),
+        method: 'POST',
+        path: '/api/auth/refresh',
+        handler: () => ({ status: 401, body: errorBody('UNAUTHENTICATED', 'No refresh token provided.') }),
+      },
+      {
+        method: 'POST',
+        path: '/api/auth/login',
+        handler: () => ({ status: 401, body: errorBody('UNAUTHENTICATED', 'Invalid email or password.') }),
       },
     ])
 
@@ -62,10 +80,12 @@ describe('SignInGate', () => {
       </SignInGate>,
     )
 
-    await userEvent.type(screen.getByLabelText('User id'), 'not-a-real-id')
-    await userEvent.click(screen.getByRole('button', { name: 'Continue' }))
+    await screen.findByLabelText('Email')
+    await userEvent.type(screen.getByLabelText('Email'), 'nobody@example.test')
+    await userEvent.type(screen.getByLabelText('Password'), 'wrong-password')
+    await userEvent.click(screen.getByRole('button', { name: 'Sign In' }))
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/not recognized/i))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/invalid email or password/i))
     expect(screen.queryByText('Protected content')).not.toBeInTheDocument()
   })
 })

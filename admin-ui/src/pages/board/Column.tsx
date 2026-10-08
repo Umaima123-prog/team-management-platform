@@ -7,6 +7,7 @@ export function Column({
   items,
   allColumns,
   pendingItemIds,
+  canMoveItem,
   onOpenItem,
   onMove,
 }: {
@@ -14,6 +15,7 @@ export function Column({
   items: WorkItem[]
   allColumns: BoardColumn[]
   pendingItemIds: Set<string>
+  canMoveItem: (item: WorkItem) => boolean
   onOpenItem: (item: WorkItem) => void
   onMove: (itemId: string, targetColumnId: string, beforeItemId: string | null) => void
 }): React.ReactElement {
@@ -71,6 +73,7 @@ export function Column({
               item={item}
               columns={allColumns}
               pending={pendingItemIds.has(item.id)}
+              canMove={canMoveItem(item)}
               onOpen={() => onOpenItem(item)}
               onDragStart={() => setDragOver(false)}
               onDragEnd={() => setDragOver(false)}

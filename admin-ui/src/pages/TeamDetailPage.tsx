@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { useCurrentUser } from '../context/CurrentUserContext'
+import { useAuth } from '../context/AuthContext'
 import { useAsync } from '../hooks/useAsync'
 import {
   addTeamMember,
@@ -18,15 +18,15 @@ const ROLES: TeamRole[] = ['OWNER', 'LEAD', 'MEMBER']
 
 export function TeamDetailPage(): React.ReactElement {
   const { teamId } = useParams<{ teamId: string }>()
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'ADMIN'
   const { showToast } = useToast()
 
   const { data: team, loading, error, reload } = useAsync(
-    (signal) => getTeam({ userId, signal }, teamId!),
-    [userId, teamId],
+    (signal) => getTeam({ signal }, teamId!),
+    [teamId],
   )
-  const { data: usersPage } = useAsync((signal) => listUsers({ userId, signal }), [userId])
+  const { data: usersPage } = useAsync((signal) => listUsers({ signal }), [])
 
   const [selectedNewMember, setSelectedNewMember] = useState('')
   const [newMemberRole, setNewMemberRole] = useState<TeamRole>('MEMBER')
@@ -46,7 +46,7 @@ export function TeamDetailPage(): React.ReactElement {
     setActionError(null)
     setBusyUserId(selectedNewMember)
     try {
-      await addTeamMember({ userId }, teamId, { userId: selectedNewMember, role: newMemberRole })
+      await addTeamMember({}, teamId, { userId: selectedNewMember, role: newMemberRole })
       showToast('success', `${userName(selectedNewMember)} added to the team.`)
       setSelectedNewMember('')
       reload()
@@ -62,7 +62,7 @@ export function TeamDetailPage(): React.ReactElement {
     setActionError(null)
     setBusyUserId(memberUserId)
     try {
-      await updateTeamMemberRole({ userId }, teamId, memberUserId, role)
+      await updateTeamMemberRole({}, teamId, memberUserId, role)
       showToast('success', 'Role updated.')
       reload()
     } catch (err) {
@@ -77,7 +77,7 @@ export function TeamDetailPage(): React.ReactElement {
     setActionError(null)
     setBusyUserId(memberUserId)
     try {
-      await removeTeamMember({ userId }, teamId, memberUserId)
+      await removeTeamMember({}, teamId, memberUserId)
       showToast('success', `${userName(memberUserId)} removed from the team.`)
       reload()
     } catch (err) {
@@ -112,7 +112,7 @@ export function TeamDetailPage(): React.ReactElement {
               <tr>
                 <th scope="col">Name</th>
                 <th scope="col">Role</th>
-                <th scope="col"></th>
+                {isAdmin && <th scope="col"></th>}
               </tr>
             </thead>
             <tbody>
@@ -127,85 +127,95 @@ export function TeamDetailPage(): React.ReactElement {
                 <tr key={member.id}>
                   <td>{userName(member.userId)}</td>
                   <td style={{ maxWidth: 160 }}>
-                    <label htmlFor={`role-${member.userId}`} className="visually-hidden">
-                      Role for {userName(member.userId)}
-                    </label>
-                    <select
-                      id={`role-${member.userId}`}
-                      className="form-select form-select-sm"
-                      value={member.role}
-                      disabled={busyUserId === member.userId}
-                      onChange={(e) => void handleRoleChange(member.userId, e.target.value as TeamRole)}
-                    >
-                      {ROLES.map((role) => (
-                        <option key={role} value={role}>
-                          {role}
-                        </option>
-                      ))}
-                    </select>
+                    {isAdmin ? (
+                      <>
+                        <label htmlFor={`role-${member.userId}`} className="visually-hidden">
+                          Role for {userName(member.userId)}
+                        </label>
+                        <select
+                          id={`role-${member.userId}`}
+                          className="form-select form-select-sm"
+                          value={member.role}
+                          disabled={busyUserId === member.userId}
+                          onChange={(e) => void handleRoleChange(member.userId, e.target.value as TeamRole)}
+                        >
+                          {ROLES.map((role) => (
+                            <option key={role} value={role}>
+                              {role}
+                            </option>
+                          ))}
+                        </select>
+                      </>
+                    ) : (
+                      member.role
+                    )}
                   </td>
-                  <td>
-                    <button
-                      type="button"
-                      className="btn btn-sm btn-outline-danger"
-                      disabled={busyUserId === member.userId}
-                      onClick={() => void handleRemove(member.userId)}
-                    >
-                      Remove
-                    </button>
-                  </td>
+                  {isAdmin && (
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-outline-danger"
+                        disabled={busyUserId === member.userId}
+                        onClick={() => void handleRemove(member.userId)}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>
           </table>
 
-          <div className="row g-2 align-items-end mt-2">
-            <div className="col-sm-5">
-              <label htmlFor="add-member-user" className="form-label">
-                Add member
-              </label>
-              <select
-                id="add-member-user"
-                className="form-select"
-                value={selectedNewMember}
-                onChange={(e) => setSelectedNewMember(e.target.value)}
-              >
-                <option value="">Select a user…</option>
-                {availableUsers.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.name} ({u.email})
-                  </option>
-                ))}
-              </select>
+          {isAdmin && (
+            <div className="row g-2 align-items-end mt-2">
+              <div className="col-sm-5">
+                <label htmlFor="add-member-user" className="form-label">
+                  Add member
+                </label>
+                <select
+                  id="add-member-user"
+                  className="form-select"
+                  value={selectedNewMember}
+                  onChange={(e) => setSelectedNewMember(e.target.value)}
+                >
+                  <option value="">Select a user…</option>
+                  {availableUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.name} ({u.email})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="col-sm-3">
+                <label htmlFor="add-member-role" className="form-label">
+                  Role
+                </label>
+                <select
+                  id="add-member-role"
+                  className="form-select"
+                  value={newMemberRole}
+                  onChange={(e) => setNewMemberRole(e.target.value as TeamRole)}
+                >
+                  {ROLES.map((role) => (
+                    <option key={role} value={role}>
+                      {role}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="col-sm-2">
+                <button
+                  type="button"
+                  className="btn btn-primary w-100"
+                  disabled={!selectedNewMember || busyUserId === selectedNewMember}
+                  onClick={() => void handleAddMember()}
+                >
+                  Add
+                </button>
+              </div>
             </div>
-            <div className="col-sm-3">
-              <label htmlFor="add-member-role" className="form-label">
-                Role
-              </label>
-              <select
-                id="add-member-role"
-                className="form-select"
-                value={newMemberRole}
-                onChange={(e) => setNewMemberRole(e.target.value as TeamRole)}
-              >
-                {ROLES.map((role) => (
-                  <option key={role} value={role}>
-                    {role}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="col-sm-2">
-              <button
-                type="button"
-                className="btn btn-primary w-100"
-                disabled={!selectedNewMember || busyUserId === selectedNewMember}
-                onClick={() => void handleAddMember()}
-              >
-                Add
-              </button>
-            </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

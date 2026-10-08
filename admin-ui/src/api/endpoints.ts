@@ -12,33 +12,33 @@ import type {
   WorkItem,
 } from './types'
 
-/** Every call needs the caller's dev user id - see
- * docs/ARCHITECTURE.md "Request context / trust model". Passed
- * explicitly (not read from a module-level global) so callers always
- * go through CurrentUserContext and it stays obvious in each call
- * site which identity is acting. */
-export interface AuthedRequest {
-  userId: string
+/** Optional per-call metadata. Identity is no longer passed through
+ * here at all - apiRequest attaches the Authorization header itself
+ * from the access token AuthContext holds (see docs/ARCHITECTURE.md
+ * "Request context / trust model"); the server derives the caller
+ * entirely from the verified JWT, never from anything the client
+ * sends in the request body or query string. */
+export interface RequestMeta {
   signal?: AbortSignal
 }
 
 // ---- Users ----
 
-export function listUsers({ userId, signal }: AuthedRequest): Promise<Page<User>> {
-  return apiRequest<Page<User>>('/api/users', { userId, signal })
+export function listUsers({ signal }: RequestMeta = {}): Promise<Page<User>> {
+  return apiRequest<Page<User>>('/api/users', { signal })
 }
 
 // ---- Teams ----
 
 export function listTeams(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   includeArchived = false,
 ): Promise<Page<Team>> {
-  return apiRequest<Page<Team>>(`/api/teams?includeArchived=${includeArchived}`, { userId, signal })
+  return apiRequest<Page<Team>>(`/api/teams?includeArchived=${includeArchived}`, { signal })
 }
 
-export function getTeam({ userId, signal }: AuthedRequest, teamId: string): Promise<TeamWithMembers> {
-  return apiRequest<TeamWithMembers>(`/api/teams/${teamId}`, { userId, signal })
+export function getTeam({ signal }: RequestMeta = {}, teamId: string): Promise<TeamWithMembers> {
+  return apiRequest<TeamWithMembers>(`/api/teams/${teamId}`, { signal })
 }
 
 export interface CreateTeamInput {
@@ -47,8 +47,8 @@ export interface CreateTeamInput {
   description?: string
 }
 
-export function createTeam({ userId, signal }: AuthedRequest, input: CreateTeamInput): Promise<Team> {
-  return apiRequest<Team>('/api/teams', { userId, signal, method: 'POST', body: input })
+export function createTeam({ signal }: RequestMeta = {}, input: CreateTeamInput): Promise<Team> {
+  return apiRequest<Team>('/api/teams', { signal, method: 'POST', body: input })
 }
 
 export interface AddTeamMemberInput {
@@ -57,12 +57,11 @@ export interface AddTeamMemberInput {
 }
 
 export function addTeamMember(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   teamId: string,
   input: AddTeamMemberInput,
 ): Promise<Membership> {
   return apiRequest<Membership>(`/api/teams/${teamId}/members`, {
-    userId,
     signal,
     method: 'POST',
     body: input,
@@ -70,13 +69,12 @@ export function addTeamMember(
 }
 
 export function updateTeamMemberRole(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   teamId: string,
   memberUserId: string,
   role: 'OWNER' | 'LEAD' | 'MEMBER',
 ): Promise<Membership> {
   return apiRequest<Membership>(`/api/teams/${teamId}/members/${memberUserId}`, {
-    userId,
     signal,
     method: 'PATCH',
     body: { role },
@@ -84,12 +82,11 @@ export function updateTeamMemberRole(
 }
 
 export function removeTeamMember(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   teamId: string,
   memberUserId: string,
 ): Promise<void> {
   return apiRequest<void>(`/api/teams/${teamId}/members/${memberUserId}`, {
-    userId,
     signal,
     method: 'DELETE',
   })
@@ -98,17 +95,16 @@ export function removeTeamMember(
 // ---- Projects ----
 
 export function listProjects(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   includeArchived = false,
 ): Promise<Page<Project>> {
   return apiRequest<Page<Project>>(`/api/projects?includeArchived=${includeArchived}`, {
-    userId,
     signal,
   })
 }
 
-export function getProject({ userId, signal }: AuthedRequest, projectId: string): Promise<Project> {
-  return apiRequest<Project>(`/api/projects/${projectId}`, { userId, signal })
+export function getProject({ signal }: RequestMeta = {}, projectId: string): Promise<Project> {
+  return apiRequest<Project>(`/api/projects/${projectId}`, { signal })
 }
 
 export interface CreateProjectInput {
@@ -119,28 +115,28 @@ export interface CreateProjectInput {
 }
 
 export function createProject(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   input: CreateProjectInput,
 ): Promise<Project> {
-  return apiRequest<Project>('/api/projects', { userId, signal, method: 'POST', body: input })
+  return apiRequest<Project>('/api/projects', { signal, method: 'POST', body: input })
 }
 
-export function getBoard({ userId, signal }: AuthedRequest, projectId: string): Promise<Board> {
-  return apiRequest<Board>(`/api/projects/${projectId}/board`, { userId, signal })
+export function getBoard({ signal }: RequestMeta = {}, projectId: string): Promise<Board> {
+  return apiRequest<Board>(`/api/projects/${projectId}/board`, { signal })
 }
 
 export function getProjectInsights(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   projectId: string,
 ): Promise<InsightsOutcome> {
-  return apiRequest<InsightsOutcome>(`/api/projects/${projectId}/insights`, { userId, signal })
+  return apiRequest<InsightsOutcome>(`/api/projects/${projectId}/insights`, { signal })
 }
 
 export function getProjectActivity(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   projectId: string,
 ): Promise<ActivityOutcome> {
-  return apiRequest<ActivityOutcome>(`/api/projects/${projectId}/activity`, { userId, signal })
+  return apiRequest<ActivityOutcome>(`/api/projects/${projectId}/activity`, { signal })
 }
 
 // ---- Work items ----
@@ -157,7 +153,7 @@ export interface ListItemsFilters {
 }
 
 export function listWorkItems(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   projectId: string,
   filters: ListItemsFilters = {},
 ): Promise<Page<WorkItem>> {
@@ -171,13 +167,12 @@ export function listWorkItems(
   if (filters.cursor) params.set('cursor', filters.cursor)
   params.set('limit', String(filters.limit ?? 100))
   return apiRequest<Page<WorkItem>>(`/api/projects/${projectId}/items?${params.toString()}`, {
-    userId,
     signal,
   })
 }
 
-export function getWorkItem({ userId, signal }: AuthedRequest, itemId: string): Promise<WorkItem> {
-  return apiRequest<WorkItem>(`/api/items/${itemId}`, { userId, signal })
+export function getWorkItem({ signal }: RequestMeta = {}, itemId: string): Promise<WorkItem> {
+  return apiRequest<WorkItem>(`/api/items/${itemId}`, { signal })
 }
 
 export interface CreateWorkItemInput {
@@ -191,12 +186,11 @@ export interface CreateWorkItemInput {
 }
 
 export function createWorkItem(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   projectId: string,
   input: CreateWorkItemInput,
 ): Promise<WorkItem> {
   return apiRequest<WorkItem>(`/api/projects/${projectId}/items`, {
-    userId,
     signal,
     method: 'POST',
     body: input,
@@ -215,12 +209,11 @@ export interface UpdateWorkItemInput {
 }
 
 export function updateWorkItem(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   itemId: string,
   input: UpdateWorkItemInput,
 ): Promise<WorkItem> {
   return apiRequest<WorkItem>(`/api/items/${itemId}`, {
-    userId,
     signal,
     method: 'PATCH',
     body: input,
@@ -228,13 +221,12 @@ export function updateWorkItem(
 }
 
 export function assignWorkItem(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   itemId: string,
   expectedVersion: number,
   assigneeId: string | null,
 ): Promise<WorkItem> {
   return apiRequest<WorkItem>(`/api/items/${itemId}/assign`, {
-    userId,
     signal,
     method: 'POST',
     body: { expectedVersion, assigneeId },
@@ -249,12 +241,11 @@ export interface MoveWorkItemInput {
 }
 
 export function moveWorkItem(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   itemId: string,
   input: MoveWorkItemInput,
 ): Promise<WorkItem> {
   return apiRequest<WorkItem>(`/api/items/${itemId}/move`, {
-    userId,
     signal,
     method: 'POST',
     body: input,
@@ -262,12 +253,11 @@ export function moveWorkItem(
 }
 
 export function archiveWorkItem(
-  { userId, signal }: AuthedRequest,
+  { signal }: RequestMeta = {},
   itemId: string,
   expectedVersion: number,
 ): Promise<WorkItem> {
   return apiRequest<WorkItem>(`/api/items/${itemId}/archive`, {
-    userId,
     signal,
     method: 'POST',
     body: { expectedVersion },

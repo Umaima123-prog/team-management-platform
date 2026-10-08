@@ -1,4 +1,3 @@
-import { useCurrentUser } from '../context/CurrentUserContext'
 import { useAsync } from '../hooks/useAsync'
 import { getProjectActivity, listUsers } from '../api/endpoints'
 import type { ProjectActivityEntry } from '../api/types'
@@ -30,13 +29,11 @@ function affectedItemLabel(entry: ProjectActivityEntry): string {
 }
 
 export function ActivityPanel({ projectId }: { projectId: string }): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
   const { data, loading, error, reload } = useAsync(
-    (signal) => getProjectActivity({ userId, signal }, projectId),
-    [userId, projectId],
+    (signal) => getProjectActivity({ signal }, projectId),
+    [projectId],
   )
-  const { data: usersPage } = useAsync((signal) => listUsers({ userId, signal }), [userId])
+  const { data: usersPage } = useAsync((signal) => listUsers({ signal }), [])
 
   function userName(id: string): string {
     return usersPage?.items.find((u) => u.id === id)?.name ?? id

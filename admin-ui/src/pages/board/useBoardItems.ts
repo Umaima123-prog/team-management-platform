@@ -41,7 +41,6 @@ interface UseBoardItemsResult {
  *    else changed concurrently) and a clear, specific toast is shown.
  */
 export function useBoardItems(
-  userId: string,
   projectId: string,
   filters: ListItemsFilters,
 ): UseBoardItemsResult {
@@ -56,13 +55,13 @@ export function useBoardItems(
   const reload = useCallback(() => setReloadToken((t) => t + 1), [])
 
   useEffect(() => {
-    if (!userId || !projectId) return
+    if (!projectId) return
     const controller = new AbortController()
     setLoading(true)
     setError(null)
     Promise.all([
-      getBoard({ userId, signal: controller.signal }, projectId),
-      listWorkItems({ userId, signal: controller.signal }, projectId, filters),
+      getBoard({ signal: controller.signal }, projectId),
+      listWorkItems({ signal: controller.signal }, projectId, filters),
     ])
       .then(([boardResult, itemsPage]) => {
         if (controller.signal.aborted) return
@@ -78,7 +77,7 @@ export function useBoardItems(
       })
     return () => controller.abort()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- filters is a plain object; stringified identity isn't worth the churn here
-  }, [userId, projectId, reloadToken, JSON.stringify(filters)])
+  }, [projectId, reloadToken, JSON.stringify(filters)])
 
   const moveItem = useCallback(
     async ({ itemId, targetColumnId, beforeItemId }: MoveRequest) => {
@@ -108,7 +107,7 @@ export function useBoardItems(
 
       try {
         const afterItemId = findNeighborAfter(next, itemId, targetColumnId)
-        const updated = await moveWorkItem({ userId }, itemId, {
+        const updated = await moveWorkItem({}, itemId, {
           expectedVersion: moving.version,
           targetColumnId,
           beforeItemId,
@@ -134,7 +133,7 @@ export function useBoardItems(
         })
       }
     },
-    [items, userId, showToast, reload],
+    [items, showToast, reload],
   )
 
   return { board, items, loading, error, reload, pendingItemIds, moveItem }

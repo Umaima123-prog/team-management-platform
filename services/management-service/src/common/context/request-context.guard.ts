@@ -1,43 +1,49 @@
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Reflector } from '@nestjs/core';
 import { randomUUID } from 'crypto';
 import { Request } from 'express';
-import { ObjectId } from 'mongodb';
-import { DatabaseService } from '../../database/database.service';
 import { ErrorCode } from '../errors/error-codes';
 import { IS_PUBLIC_KEY } from './public.decorator';
 import { RequestContext } from './request-context';
-
-interface UserDocument {
-  _id: ObjectId;
-  workspaceId: string;
-}
+import { JwtSigner } from '../../auth/jwt.util';
+import { UsersRepository } from '../../identity/users.repository';
 
 interface RequestWithContext extends Request {
   context?: RequestContext;
   correlationId?: string;
 }
 
-const DEV_USER_HEADER = 'x-dev-user-id';
-
 /**
- * Development-only trust mechanism (see docs/ARCHITECTURE.md -
- * "Request context / trust model" - for the honest explanation of why
- * this exists and what replaces it later).
+ * Real authentication (Phase 9 - see docs/DECISIONS.md for the
+ * migration from the Phase 3 X-Dev-User-Id development header, which
+ * this guard no longer accepts or trusts in any way).
  *
- * The caller identifies themselves via the X-Dev-User-Id header - this
- * stands in for "the user a real auth system authenticated." The
- * server then looks that user up and derives workspaceId from the
- * user's own record. The browser never supplies workspaceId directly,
- * and nothing downstream trusts one that did - every authoritative
- * write/read is scoped to the workspaceId resolved here.
+ * The caller presents a JWT access token via `Authorization: Bearer
+ * <token>`. This guard verifies its signature/expiry, then - because
+ * an authorization-sensitive field (role, active) can change after a
+ * token was issued and short-lived access tokens are still a window
+ * an admin might need to close immediately (e.g. deactivating someone
+ * mid-session) - re-reads the live user record by the token's own
+ * `sub` claim rather than trusting the token's claims at face value
+ * for anything but identity. `workspaceId` IS trusted from the token:
+ * it was never client-supplied, it is a claim *this service itself*
+ * signed at login time from the user's own stored record (the same
+ * non-negotiable rule docs/ARCHITECTURE.md's "Request context / trust
+ * model" has always applied, just moved from "header lookup" to
+ * "token verification" exactly as that section anticipated).
  */
 @Injectable()
 export class RequestContextGuard implements CanActivate {
+  private readonly jwtSigner: JwtSigner;
+
   constructor(
     private readonly reflector: Reflector,
-    private readonly databaseService: DatabaseService,
-  ) {}
+    private readonly usersRepository: UsersRepository,
+    config: ConfigService,
+  ) {
+    this.jwtSigner = new JwtSigner(config);
+  }
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
@@ -47,32 +53,46 @@ export class RequestContextGuard implements CanActivate {
     if (isPublic) return true;
 
     const request = context.switchToHttp().getRequest<RequestWithContext>();
-    const header = request.headers[DEV_USER_HEADER];
-    const userId = Array.isArray(header) ? header[0] : header;
+    const authHeader = request.headers.authorization;
+    const token =
+      typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+        ? authHeader.slice('Bearer '.length).trim()
+        : undefined;
 
-    if (!userId || !ObjectId.isValid(userId)) {
+    if (!token) {
       throw new UnauthorizedException({
         code: ErrorCode.UNAUTHENTICATED,
-        message:
-          'X-Dev-User-Id header is required and must be a valid user id. ' +
-          'This is a documented development-only trust mechanism - see docs/ARCHITECTURE.md.',
+        message: 'Authorization: Bearer <token> is required.',
       });
     }
 
-    const user = await this.databaseService
-      .getCollection<UserDocument>('users')
-      .findOne({ _id: new ObjectId(userId) });
-
-    if (!user) {
+    let payload;
+    try {
+      payload = this.jwtSigner.verifyAccessToken(token);
+    } catch {
+      // Never echo jwt.verify's own error detail (e.g. exact expiry
+      // timestamp) to the client - a generic 401 either way.
       throw new UnauthorizedException({
         code: ErrorCode.UNAUTHENTICATED,
-        message: 'Unknown user.',
+        message: 'Invalid or expired access token.',
+      });
+    }
+
+    const user = await this.usersRepository.findById(payload.workspaceId, payload.sub);
+    if (!user || !user.active) {
+      throw new UnauthorizedException({
+        code: ErrorCode.UNAUTHENTICATED,
+        message: 'Unknown or inactive user.',
       });
     }
 
     request.context = {
       userId: user._id.toHexString(),
       workspaceId: user.workspaceId,
+      // The live record's role, not the token's claim - so a role
+      // change (e.g. demotion) takes effect on the very next request,
+      // not only once the short-lived access token itself expires.
+      role: user.role,
       // CorrelationIdMiddleware runs before every guard and always sets
       // this - the fallback only guards against a misconfigured test
       // harness that bypasses the middleware chain.

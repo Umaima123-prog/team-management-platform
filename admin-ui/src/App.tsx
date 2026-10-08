@@ -1,5 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
-import { CurrentUserProvider } from './context/CurrentUserContext'
+import { AuthProvider } from './context/AuthContext'
 import { ToastProvider } from './context/ToastContext'
 import { SignInGate } from './components/common/SignInGate'
 import { Shell } from './components/layout/Shell'
@@ -11,7 +11,7 @@ import { ProjectDetailPage } from './pages/ProjectDetailPage'
 
 function App(): React.ReactElement {
   return (
-    <CurrentUserProvider>
+    <AuthProvider>
       <ToastProvider>
         <SignInGate>
           <BrowserRouter>
@@ -28,7 +28,7 @@ function App(): React.ReactElement {
           </BrowserRouter>
         </SignInGate>
       </ToastProvider>
-    </CurrentUserProvider>
+    </AuthProvider>
   )
 }
 

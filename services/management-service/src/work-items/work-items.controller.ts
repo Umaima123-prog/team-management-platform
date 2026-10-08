@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Roles } from '../auth/roles.decorator';
 import { CurrentContext } from '../common/context/current-context.decorator';
 import { RequestContext } from '../common/context/request-context';
 import { withId } from '../common/mongo/with-id.util';
@@ -16,6 +17,7 @@ import { WorkItemsService } from './work-items.service';
 export class WorkItemsController {
   constructor(private readonly workItemsService: WorkItemsService) {}
 
+  @Roles('ADMIN')
   @Post('api/projects/:projectId/items')
   async create(
     @CurrentContext() ctx: RequestContext,
@@ -52,6 +54,11 @@ export class WorkItemsController {
     return withId(item);
   }
 
+  // No @Roles() here - any authenticated role may attempt this route,
+  // but EMPLOYEE may only act on a work item currently assigned to
+  // them. That can't be a route-level decorator (it depends on the
+  // loaded item, not just the caller's role), so it's enforced inside
+  // WorkItemsService.updateWorkItem via assertCanMutateAssignedItem.
   @Patch('api/items/:itemId')
   async update(
     @CurrentContext() ctx: RequestContext,
@@ -63,11 +70,13 @@ export class WorkItemsController {
       itemId,
       dto,
       ctx.userId,
+      ctx.role,
       ctx.correlationId,
     );
     return withId(item);
   }
 
+  @Roles('ADMIN')
   @Post('api/items/:itemId/assign')
   async assign(
     @CurrentContext() ctx: RequestContext,
@@ -84,6 +93,8 @@ export class WorkItemsController {
     return withId(item);
   }
 
+  // Same ownership rule as update() above - enforced in
+  // WorkItemsService.moveWorkItem, not here.
   @Post('api/items/:itemId/move')
   async move(
     @CurrentContext() ctx: RequestContext,
@@ -95,11 +106,13 @@ export class WorkItemsController {
       itemId,
       dto,
       ctx.userId,
+      ctx.role,
       ctx.correlationId,
     );
     return withId(item);
   }
 
+  @Roles('ADMIN')
   @Post('api/items/:itemId/archive')
   async archive(
     @CurrentContext() ctx: RequestContext,

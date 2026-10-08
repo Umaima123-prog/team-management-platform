@@ -2,19 +2,21 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { ItemDrawer } from './ItemDrawer'
-import { CurrentUserProvider } from '../context/CurrentUserContext'
+import { AuthProvider } from '../context/AuthContext'
 import { ToastProvider } from '../context/ToastContext'
-import { installMockFetch } from '../test/mockApi'
-import { ALICE, ALL_USERS, ITEM_A, TEAM_WITH_MEMBERS } from '../test/fixtures'
+import { installMockFetch, authSessionRoutes } from '../test/mockApi'
+import { ALICE_AUTH, ALL_USERS, ITEM_A, TEAM_WITH_MEMBERS } from '../test/fixtures'
 
 describe('ItemDrawer accessibility', () => {
   it('is an aria-modal dialog, moves focus to it on open, and closes on Escape', async () => {
-    window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-    installMockFetch([{ path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) }])
+    installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
+      { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+    ])
     const onClose = vi.fn()
 
     render(
-      <CurrentUserProvider>
+      <AuthProvider>
         <ToastProvider>
           <ItemDrawer
             item={ITEM_A}
@@ -24,8 +26,10 @@ describe('ItemDrawer accessibility', () => {
             onUpdated={() => {}}
           />
         </ToastProvider>
-      </CurrentUserProvider>,
+      </AuthProvider>,
     )
+
+    await screen.findByRole('dialog', { name: 'ENG1-1' })
 
     const dialog = screen.getByRole('dialog', { name: 'ENG1-1' })
     expect(dialog).toHaveAttribute('aria-modal', 'true')
@@ -36,11 +40,13 @@ describe('ItemDrawer accessibility', () => {
   })
 
   it('associates every field with a visible, programmatic label (not placeholder-only)', async () => {
-    window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-    installMockFetch([{ path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) }])
+    installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
+      { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+    ])
 
     render(
-      <CurrentUserProvider>
+      <AuthProvider>
         <ToastProvider>
           <ItemDrawer
             item={ITEM_A}
@@ -50,11 +56,11 @@ describe('ItemDrawer accessibility', () => {
             onUpdated={() => {}}
           />
         </ToastProvider>
-      </CurrentUserProvider>,
+      </AuthProvider>,
     )
 
     for (const name of ['Title', 'Description', 'Type', 'Priority', 'Assignee', 'Labels', 'Due date']) {
-      expect(screen.getByLabelText(name)).toBeInTheDocument()
+      expect(await screen.findByLabelText(name)).toBeInTheDocument()
     }
   })
 })

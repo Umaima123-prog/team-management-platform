@@ -1,16 +1,13 @@
 import { screen, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { InsightsPanel } from './InsightsPanel'
 import { renderWithProviders } from '../test/renderWithProviders'
-import { installMockFetch } from '../test/mockApi'
-import { ALICE, ALL_USERS, BOARD, PROJECT } from '../test/fixtures'
-
-beforeEach(() => {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-})
+import { installMockFetch, authSessionRoutes } from '../test/mockApi'
+import { ALICE_AUTH, ALL_USERS, BOARD, PROJECT } from '../test/fixtures'
 
 function usersAndBoardRoutes() {
   return [
+    ...authSessionRoutes(ALICE_AUTH),
     { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
     { path: `/api/projects/${PROJECT.id}/board`, handler: () => ({ body: BOARD }) },
   ]

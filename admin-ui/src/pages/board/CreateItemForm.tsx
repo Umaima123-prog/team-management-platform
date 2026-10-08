@@ -4,13 +4,11 @@ import type { Membership, User } from '../../api/types'
 import { errorMessage } from '../../components/common/ErrorAlert'
 
 export function CreateItemForm({
-  userId,
   projectId,
   teamMembers,
   users,
   onCreated,
 }: {
-  userId: string
   projectId: string
   teamMembers: Membership[]
   users: User[]
@@ -33,7 +31,7 @@ export function CreateItemForm({
     setSubmitError(null)
     setSubmitting(true)
     try {
-      await createWorkItem({ userId }, projectId, {
+      await createWorkItem({}, projectId, {
         title,
         type,
         priority,

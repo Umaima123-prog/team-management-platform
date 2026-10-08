@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { useCurrentUser } from '../context/CurrentUserContext'
+import { useAuth } from '../context/AuthContext'
 import { useAsync } from '../hooks/useAsync'
 import { ApiError } from '../api/client'
 import { createTeam, listTeams } from '../api/endpoints'
@@ -9,9 +9,9 @@ import { LoadingSpinner } from '../components/common/LoadingSpinner'
 import { useToast } from '../context/ToastContext'
 
 export function TeamsPage(): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
-  const { data, loading, error, reload } = useAsync((signal) => listTeams({ userId, signal }), [userId])
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'ADMIN'
+  const { data, loading, error, reload } = useAsync((signal) => listTeams({ signal }), [])
   const { showToast } = useToast()
 
   const [code, setCode] = useState('')
@@ -25,7 +25,7 @@ export function TeamsPage(): React.ReactElement {
     setSubmitError(null)
     setSubmitting(true)
     try {
-      await createTeam({ userId }, { code, name, description: description || undefined })
+      await createTeam({}, { code, name, description: description || undefined })
       setCode('')
       setName('')
       setDescription('')
@@ -49,59 +49,61 @@ export function TeamsPage(): React.ReactElement {
     <div>
       <h1 className="h3 mb-4">Teams</h1>
 
-      <div className="card mb-4">
-        <div className="card-body">
-          <h2 className="h6">Create a team</h2>
-          <form onSubmit={handleSubmit} className="row g-2 align-items-end">
-            <div className="col-sm-3">
-              <label htmlFor="team-code" className="form-label">
-                Code
-              </label>
-              <input
-                id="team-code"
-                className="form-control"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                maxLength={10}
-                required
-              />
-            </div>
-            <div className="col-sm-4">
-              <label htmlFor="team-name" className="form-label">
-                Name
-              </label>
-              <input
-                id="team-name"
-                className="form-control"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-              />
-            </div>
-            <div className="col-sm-4">
-              <label htmlFor="team-description" className="form-label">
-                Description
-              </label>
-              <input
-                id="team-description"
-                className="form-control"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
-            </div>
-            <div className="col-sm-1">
-              <button type="submit" className="btn btn-primary w-100" disabled={submitting}>
-                {submitting ? '…' : 'Add'}
-              </button>
-            </div>
-          </form>
-          {submitError && (
-            <div className="alert alert-danger mt-3 mb-0" role="alert">
-              {submitError}
-            </div>
-          )}
+      {isAdmin && (
+        <div className="card mb-4">
+          <div className="card-body">
+            <h2 className="h6">Create a team</h2>
+            <form onSubmit={handleSubmit} className="row g-2 align-items-end">
+              <div className="col-sm-3">
+                <label htmlFor="team-code" className="form-label">
+                  Code
+                </label>
+                <input
+                  id="team-code"
+                  className="form-control"
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  maxLength={10}
+                  required
+                />
+              </div>
+              <div className="col-sm-4">
+                <label htmlFor="team-name" className="form-label">
+                  Name
+                </label>
+                <input
+                  id="team-name"
+                  className="form-control"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="col-sm-4">
+                <label htmlFor="team-description" className="form-label">
+                  Description
+                </label>
+                <input
+                  id="team-description"
+                  className="form-control"
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                />
+              </div>
+              <div className="col-sm-1">
+                <button type="submit" className="btn btn-primary w-100" disabled={submitting}>
+                  {submitting ? '…' : 'Add'}
+                </button>
+              </div>
+            </form>
+            {submitError && (
+              <div className="alert alert-danger mt-3 mb-0" role="alert">
+                {submitError}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {loading && <LoadingSpinner label="Loading teams…" />}
       {error && <ErrorAlert error={error} onRetry={reload} />}

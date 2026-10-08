@@ -1,4 +1,4 @@
-import type { Board, Project, Team, TeamWithMembers, User, WorkItem } from '../api/types'
+import type { AuthUser, Board, Project, Team, TeamWithMembers, User, WorkItem } from '../api/types'
 
 export const ALICE: User = {
   id: 'u-alice',
@@ -30,6 +30,15 @@ export const DAVE: User = {
 }
 
 export const ALL_USERS = [ALICE, BOB, CAROL, DAVE]
+
+/** The authenticated-session shape (role/active) - distinct from the
+ * plain `User` records above, which only mirror GET /api/users and
+ * never carry a role. Alice is the seeded ADMIN; the rest are
+ * EMPLOYEE, matching services/management-service/src/seed/seed-ids.ts. */
+export const ALICE_AUTH: AuthUser = { ...ALICE, role: 'ADMIN', active: true }
+export const BOB_AUTH: AuthUser = { ...BOB, role: 'EMPLOYEE', active: true }
+export const CAROL_AUTH: AuthUser = { ...CAROL, role: 'EMPLOYEE', active: true }
+export const DAVE_AUTH: AuthUser = { ...DAVE, role: 'EMPLOYEE', active: true }
 
 export const TEAM: Team = {
   id: 'team-1',

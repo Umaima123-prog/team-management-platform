@@ -1,4 +1,5 @@
 import { Body, Controller, Get, Param, Patch, Post, Query } from '@nestjs/common';
+import { Roles } from '../auth/roles.decorator';
 import { CurrentContext } from '../common/context/current-context.decorator';
 import { RequestContext } from '../common/context/request-context';
 import { withId } from '../common/mongo/with-id.util';
@@ -19,6 +20,7 @@ export class ProjectsController {
     private readonly activityClient: ActivityClientService,
   ) {}
 
+  @Roles('ADMIN')
   @Post()
   async create(@CurrentContext() ctx: RequestContext, @Body() dto: CreateProjectDto) {
     const project = await this.projectsService.createProject(ctx.workspaceId, dto, ctx.userId, ctx.correlationId);
@@ -43,6 +45,7 @@ export class ProjectsController {
     return withId(project);
   }
 
+  @Roles('ADMIN')
   @Patch(':projectId')
   async update(
     @CurrentContext() ctx: RequestContext,
@@ -59,6 +62,7 @@ export class ProjectsController {
     return withId(project);
   }
 
+  @Roles('ADMIN')
   @Post(':projectId/archive')
   async archive(
     @CurrentContext() ctx: RequestContext,

@@ -21,6 +21,31 @@ export class UsersRepository extends WorkspaceScopedRepository<UserDocument> {
   }
 
   /**
+   * Login's one legitimate exception to "every query is workspace-
+   * scoped": at the point of login there IS no workspaceId yet - the
+   * email the caller typed is the only thing available to resolve
+   * one from. The unique index is `{workspaceId, email}` (scoped), not
+   * a global email uniqueness guarantee, but this deployment seeds
+   * exactly one workspace, so in practice this always resolves to at
+   * most one real match. Never used anywhere a workspaceId is already
+   * known - every other method on this class stays scoped.
+   */
+  findByEmailAnyWorkspace(email: string) {
+    return this.collection.findOne({ email } as never);
+  }
+
+  /** Bumps the counter embedded in every refresh token issued for this
+   * user, so logout (or a future password-change flow) invalidates
+   * every refresh token issued before now without a separate
+   * token-blacklist collection - see auth.service.ts. */
+  async incrementTokenVersion(workspaceId: string, userId: string): Promise<void> {
+    await this.collection.updateOne(
+      { _id: new ObjectId(userId), workspaceId } as never,
+      { $inc: { tokenVersion: 1 } } as never,
+    );
+  }
+
+  /**
    * Validates that `userId` is a real user in `workspaceId` - the
    * check backing "reporter must be a valid workspace user",
    * "owner ... must belong to the same workspace", etc. Throws a

@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { ErrorCode } from '../common/errors/error-codes';
 import { clampLimit, decodeCursor, encodeCursor } from '../common/pagination/cursor.util';
 import { DatabaseService } from '../database/database.service';
@@ -8,6 +8,8 @@ import { BoardsService } from '../boards/boards.service';
 import { ProjectsService } from '../projects/projects.service';
 import { MembershipsRepository } from '../teams/memberships.repository';
 import { UsersRepository } from '../identity/users.repository';
+import { UserRole } from '../identity/user.schema';
+import { WorkItemDocument } from './work-item.schema';
 import { AssignWorkItemDto } from './dto/assign-work-item.dto';
 import { CreateWorkItemDto } from './dto/create-work-item.dto';
 import { ListWorkItemsQueryDto } from './dto/list-work-items-query.dto';
@@ -52,6 +54,28 @@ export class WorkItemsService {
     }
     const [first] = [...board.columns].sort((a, b) => a.order - b.order);
     return first;
+  }
+
+  /** EMPLOYEE may update/move the status of ONLY a work item currently
+   * assigned to them - never another employee's item, regardless of
+   * project/team visibility. ADMIN is exempt entirely. This is a
+   * per-resource ownership rule, not a blanket role gate, so it can't
+   * be expressed as a declarative `@Roles()` decorator (which runs
+   * before the item is even loaded) - it lives here, the one place
+   * both the item and the live requester role are already in hand,
+   * rather than scattered across the controller. */
+  private assertCanMutateAssignedItem(
+    item: Pick<WorkItemDocument, 'assigneeId'>,
+    requesterId: string,
+    requesterRole: UserRole,
+  ): void {
+    if (requesterRole === 'ADMIN') return;
+    if (item.assigneeId !== requesterId) {
+      throw new ForbiddenException({
+        code: ErrorCode.FORBIDDEN,
+        message: 'You can only update or move work items assigned to you.',
+      });
+    }
   }
 
   /** "assignee must be a member of the project's owning team" */
@@ -182,9 +206,11 @@ export class WorkItemsService {
     itemId: string,
     dto: UpdateWorkItemDto,
     actorId: string,
+    actorRole: UserRole,
     correlationId: string,
   ) {
-    await this.getItemOrThrow(workspaceId, itemId);
+    const existing = await this.getItemOrThrow(workspaceId, itemId);
+    this.assertCanMutateAssignedItem(existing, actorId, actorRole);
     const patch: Partial<{
       title: string;
       description: string | null;
@@ -285,9 +311,11 @@ export class WorkItemsService {
     itemId: string,
     dto: MoveWorkItemDto,
     actorId: string,
+    actorRole: UserRole,
     correlationId: string,
   ) {
     const item = await this.getItemOrThrow(workspaceId, itemId);
+    this.assertCanMutateAssignedItem(item, actorId, actorRole);
     const board = await this.boardsService.getByIdOrThrow(workspaceId, item.boardId);
     const targetColumn = board.columns.find((c) => c.id === dto.targetColumnId);
     if (!targetColumn) {

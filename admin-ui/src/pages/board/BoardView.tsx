@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useCurrentUser } from '../../context/CurrentUserContext'
+import { useAuth } from '../../context/AuthContext'
 import { useAsync } from '../../hooks/useAsync'
 import { getTeam, listUsers } from '../../api/endpoints'
 import type { ListItemsFilters } from '../../api/endpoints'
@@ -13,25 +13,27 @@ import { ItemDrawer } from '../ItemDrawer'
 import { CreateItemForm } from './CreateItemForm'
 
 export function BoardView({ project }: { project: Project }): React.ReactElement {
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'ADMIN'
   const [filters, setFilters] = useState<ListItemsFilters>({})
   const [openItemId, setOpenItemId] = useState<string | null>(null)
 
   const { board, items, loading, error, reload, pendingItemIds, moveItem } = useBoardItems(
-    userId,
     project.id,
     filters,
   )
-  const { data: team } = useAsync((signal) => getTeam({ userId, signal }, project.teamId), [
-    userId,
+  const { data: team } = useAsync((signal) => getTeam({ signal }, project.teamId), [
     project.teamId,
   ])
-  const { data: usersPage } = useAsync((signal) => listUsers({ userId, signal }), [userId])
+  const { data: usersPage } = useAsync((signal) => listUsers({ signal }), [])
 
   const teamMembers = team?.members.filter((m) => !m.removedAt) ?? []
   const users = usersPage?.items ?? []
   const openItem = items.find((i) => i.id === openItemId) ?? null
+
+  // Server-enforced rule (WorkItemsService.assertCanMutateAssignedItem):
+  // ADMIN may move any card; EMPLOYEE only one assigned to them.
+  const canMoveItem = (item: WorkItem): boolean => isAdmin || item.assigneeId === user?.id
 
   if (loading) return <LoadingSpinner label="Loading board…" />
   if (error) return <ErrorAlert error={error} onRetry={reload} />
@@ -43,13 +45,14 @@ export function BoardView({ project }: { project: Project }): React.ReactElement
     <div>
       <BoardFilters filters={filters} onChange={setFilters} teamMembers={teamMembers} users={users} />
 
-      <CreateItemForm
-        userId={userId}
-        projectId={project.id}
-        teamMembers={teamMembers}
-        users={users}
-        onCreated={reload}
-      />
+      {isAdmin && (
+        <CreateItemForm
+          projectId={project.id}
+          teamMembers={teamMembers}
+          users={users}
+          onCreated={reload}
+        />
+      )}
 
       <div className="board-columns" role="list" aria-label="Kanban board columns">
         {sortedColumns.map((column) => (
@@ -61,6 +64,7 @@ export function BoardView({ project }: { project: Project }): React.ReactElement
                 .filter((i) => i.columnId === column.id)
                 .sort((a, b) => a.rank - b.rank)}
               pendingItemIds={pendingItemIds}
+              canMoveItem={canMoveItem}
               onOpenItem={(item: WorkItem) => setOpenItemId(item.id)}
               onMove={(itemId, targetColumnId, beforeItemId) =>
                 void moveItem({ itemId, targetColumnId, beforeItemId })

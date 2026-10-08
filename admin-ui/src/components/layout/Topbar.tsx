@@ -1,4 +1,4 @@
-import { useCurrentUser } from '../../context/CurrentUserContext'
+import { useAuth } from '../../context/AuthContext'
 
 export function Topbar({
   onToggleSidebar,
@@ -7,7 +7,7 @@ export function Topbar({
   onToggleSidebar: () => void
   sidebarOpen: boolean
 }): React.ReactElement {
-  const { users, currentUser, setCurrentUserId, signOut } = useCurrentUser()
+  const { user, logout } = useAuth()
 
   return (
     <header className="app-topbar">
@@ -21,24 +21,12 @@ export function Topbar({
         ☰
       </button>
       <div className="flex-grow-1" />
-      <label htmlFor="current-user-select" className="visually-hidden">
-        Acting as
-      </label>
-      <select
-        id="current-user-select"
-        className="form-select form-select-sm current-user-select"
-        style={{ width: 'auto' }}
-        value={currentUser?.id ?? ''}
-        onChange={(e) => setCurrentUserId(e.target.value)}
-        aria-label="Acting as"
-      >
-        {users.map((user) => (
-          <option key={user.id} value={user.id}>
-            {user.name}
-          </option>
-        ))}
-      </select>
-      <button type="button" className="btn btn-sm btn-outline-secondary" onClick={signOut}>
+      {user && (
+        <span className="text-muted small me-2">
+          {user.name} <span className="badge text-bg-secondary">{user.role}</span>
+        </span>
+      )}
+      <button type="button" className="btn btn-sm btn-outline-secondary" onClick={() => void logout()}>
         Sign out
       </button>
     </header>

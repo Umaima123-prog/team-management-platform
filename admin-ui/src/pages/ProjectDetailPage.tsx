@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { useCurrentUser } from '../context/CurrentUserContext'
 import { useAsync } from '../hooks/useAsync'
 import { getProject } from '../api/endpoints'
 import { ErrorAlert } from '../components/common/ErrorAlert'
@@ -19,13 +18,11 @@ const TABS: Array<{ id: Tab; label: string }> = [
 
 export function ProjectDetailPage(): React.ReactElement {
   const { projectId } = useParams<{ projectId: string }>()
-  const { currentUser } = useCurrentUser()
-  const userId = currentUser?.id ?? ''
   const [tab, setTab] = useState<Tab>('board')
 
   const { data: project, loading, error, reload } = useAsync(
-    (signal) => getProject({ userId, signal }, projectId!),
-    [userId, projectId],
+    (signal) => getProject({ signal }, projectId!),
+    [projectId],
   )
 
   if (loading) return <LoadingSpinner label="Loading project…" />

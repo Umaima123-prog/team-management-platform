@@ -1,17 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { BoardView } from './BoardView'
 import { renderWithProviders } from '../../test/renderWithProviders'
-import { installMockFetch, errorBody } from '../../test/mockApi'
-import { ALICE, ALL_USERS, BOARD, ITEM_A, ITEM_B, ITEM_C, PROJECT, TEAM_WITH_MEMBERS } from '../../test/fixtures'
-
-beforeEach(() => {
-  window.localStorage.setItem('admin-ui.currentUserId', ALICE.id)
-})
+import { installMockFetch, errorBody, authSessionRoutes } from '../../test/mockApi'
+import { ALICE_AUTH, ALL_USERS, BOARD, BOB_AUTH, ITEM_A, ITEM_B, ITEM_C, PROJECT, TEAM_WITH_MEMBERS } from '../../test/fixtures'
 
 function baseRoutes(itemsOverride?: (typeof ITEM_A)[]) {
   return [
+    ...authSessionRoutes(ALICE_AUTH),
     { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
     { path: `/api/teams/${TEAM_WITH_MEMBERS.id}`, handler: () => ({ body: TEAM_WITH_MEMBERS }) },
     { path: `/api/projects/${PROJECT.id}/board`, handler: () => ({ body: BOARD }) },
@@ -131,6 +128,7 @@ describe('Move/drag command behavior', () => {
   it('on a 409 conflict, refreshes the whole board and tells the user clearly', async () => {
     let boardFetchCount = 0
     installMockFetch([
+      ...authSessionRoutes(ALICE_AUTH),
       { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
       { path: `/api/teams/${TEAM_WITH_MEMBERS.id}`, handler: () => ({ body: TEAM_WITH_MEMBERS }) },
       {
@@ -164,5 +162,84 @@ describe('Move/drag command behavior', () => {
 
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/changed on the server/i))
     await waitFor(() => expect(boardFetchCount).toBeGreaterThan(boardFetchesBeforeMove))
+  })
+})
+
+describe('EMPLOYEE restrictions', () => {
+  it('hides "+ New item" - creating work items is ADMIN-only', async () => {
+    installMockFetch([
+      ...authSessionRoutes(BOB_AUTH),
+      { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+      { path: `/api/teams/${TEAM_WITH_MEMBERS.id}`, handler: () => ({ body: TEAM_WITH_MEMBERS }) },
+      { path: `/api/projects/${PROJECT.id}/board`, handler: () => ({ body: BOARD }) },
+      {
+        path: `/api/projects/${PROJECT.id}/items`,
+        handler: () => ({ body: { items: [ITEM_A, ITEM_B, ITEM_C], nextCursor: null } }),
+      },
+    ])
+
+    renderWithProviders(<BoardView project={PROJECT} />)
+
+    await screen.findByTestId('card-item-a')
+    expect(screen.queryByRole('button', { name: '+ New item' })).not.toBeInTheDocument()
+  })
+})
+
+describe('move-control ownership (server-enforced; mirrored in the UI)', () => {
+  it("1. EMPLOYEE sees enabled move controls for a work item assigned to them", async () => {
+    const ownItem = { ...ITEM_B, assigneeId: BOB_AUTH.id }
+    installMockFetch([
+      ...authSessionRoutes(BOB_AUTH),
+      { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+      { path: `/api/teams/${TEAM_WITH_MEMBERS.id}`, handler: () => ({ body: TEAM_WITH_MEMBERS }) },
+      { path: `/api/projects/${PROJECT.id}/board`, handler: () => ({ body: BOARD }) },
+      {
+        path: `/api/projects/${PROJECT.id}/items`,
+        handler: () => ({ body: { items: [ownItem], nextCursor: null } }),
+      },
+    ])
+
+    renderWithProviders(<BoardView project={PROJECT} />)
+    await screen.findByTestId('card-item-b')
+
+    expect(screen.getByLabelText('Move ENG1-2 to column')).toBeEnabled()
+    expect(screen.getByTestId('card-item-b')).toHaveAttribute('draggable', 'true')
+  })
+
+  it("2. EMPLOYEE sees disabled move controls for another employee's assigned work item", async () => {
+    // ITEM_A is assigned to Carol, not Bob.
+    installMockFetch([
+      ...authSessionRoutes(BOB_AUTH),
+      { path: '/api/users', handler: () => ({ body: { items: ALL_USERS } }) },
+      { path: `/api/teams/${TEAM_WITH_MEMBERS.id}`, handler: () => ({ body: TEAM_WITH_MEMBERS }) },
+      { path: `/api/projects/${PROJECT.id}/board`, handler: () => ({ body: BOARD }) },
+      {
+        path: `/api/projects/${PROJECT.id}/items`,
+        handler: () => ({ body: { items: [ITEM_A, ITEM_B], nextCursor: null } }),
+      },
+    ])
+
+    renderWithProviders(<BoardView project={PROJECT} />)
+    await screen.findByTestId('card-item-a')
+
+    expect(screen.getByLabelText('Move ENG1-1 down within its column')).toBeDisabled()
+    expect(screen.getByLabelText('Move ENG1-1 to column')).toBeDisabled()
+    expect(screen.getByTestId('card-item-a')).toHaveAttribute('draggable', 'false')
+
+    // An unassigned item (ITEM_B) is also not theirs - also disabled.
+    expect(screen.getByLabelText('Move ENG1-2 to column')).toBeDisabled()
+  })
+
+  it('3. ADMIN sees enabled move controls for every item, regardless of who it is assigned to', async () => {
+    // ITEM_A -> Carol, ITEM_B -> unassigned, ITEM_C -> Alice herself - none of that should matter for ADMIN.
+    installMockFetch(baseRoutes([ITEM_A, ITEM_B, ITEM_C]))
+
+    renderWithProviders(<BoardView project={PROJECT} />)
+    await screen.findByTestId('card-item-a')
+
+    expect(screen.getByLabelText('Move ENG1-1 to column')).toBeEnabled()
+    expect(screen.getByLabelText('Move ENG1-2 to column')).toBeEnabled()
+    expect(screen.getByLabelText('Move ENG1-3 to column')).toBeEnabled()
+    expect(screen.getByTestId('card-item-a')).toHaveAttribute('draggable', 'true')
   })
 })
